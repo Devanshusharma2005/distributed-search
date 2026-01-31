@@ -1,0 +1,10 @@
+data.xml
+enwiki*
+*.gz
+*.bz2
+distributed-search
+data.xml
+enwiki*
+*.gz
+*.bz2
+.DS_Store
