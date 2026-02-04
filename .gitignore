@@ -8,3 +8,14 @@ enwiki*
 *.gz
 *.bz2
 .DS_Store
+
+# Bleve index data
+*.bleve/
+
+# Load test results
+results.bin
+
+# Go binaries
+searcher
+indexer
+

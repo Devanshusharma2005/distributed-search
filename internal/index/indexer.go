@@ -108,6 +108,10 @@ flush:
 	return nil
 }
 
+// func (idx *Indexer) DocCount() (uint64, error) {
+// 	return idx.Index.DocCount()
+// }
+
 func (idx *Indexer) Close() error {
 	return idx.Index.Close()
 }
