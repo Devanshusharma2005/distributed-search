@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -15,16 +16,26 @@ import (
 func main() {
 	var (
 		jsonlPath = flag.String("input", "docs.jsonl", "path to JSONL docs")
-		indexPath = flag.String("index", "search.bleve", "path to bleve index")
+		indexPath = flag.String("index", "search.bleve", "base index path")
+		shardID   = flag.Int("shard-id", -1, "shard ID for this index (-1 = unsharded mode)")
 		batchSize = flag.Int("batch-size", 1000, "batch size for indexing")
 		maxDocs   = flag.Int("max-docs", 0, "max docs to index (0=all)")
 	)
 	flag.Parse()
 
-	log.Printf("🚀 Starting indexer | input=%s index=%s batch=%d max=%d",
-		*jsonlPath, *indexPath, *batchSize, *maxDocs)
+	// Computing the final index path based on shard mode
+	finalIndexPath := *indexPath
+	if *shardID >= 0 {
+		finalIndexPath = fmt.Sprintf("%s-%d", *indexPath, *shardID)
+		log.Printf("🔀 Shard mode: indexing shard-%d → %s", *shardID, finalIndexPath)
+	} else {
+		log.Printf("📦 Unsharded mode → %s", finalIndexPath)
+	}
 
-	indexer, err := index.NewIndexer(*indexPath)
+	log.Printf("🚀 Starting indexer | input=%s index=%s batch=%d max=%d",
+		*jsonlPath, finalIndexPath, *batchSize, *maxDocs)
+
+	indexer, err := index.NewIndexer(finalIndexPath)
 	if err != nil {
 		log.Fatalf("init indexer: %v", err)
 	}

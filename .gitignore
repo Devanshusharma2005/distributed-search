@@ -30,6 +30,15 @@ docs.jsonl
 docker/.env
 # Logs
 *.log
+# Ignore the compiled indexer binary
+indexer-bin
+
+# Ignore all bleve index directories (monolith and shards)
+search.bleve*
+
+Ignore all local executables (optional but recommended)
+*.test
+__debug_bin
 
 
 
