@@ -1,0 +1,57 @@
+version: '3.8'
+
+services:
+  etcd0:
+    image: quay.io/coreos/etcd:v3.5.12
+    ports:
+      - "2379:2379"  # client port
+      - "2380:2380"  # peer port
+    environment:
+      - ETCD_NAME=etcd0
+      - ETCD_LISTEN_CLIENT_URLS=http://0.0.0.0:2379
+      - ETCD_ADVERTISE_CLIENT_URLS=http://localhost:2379
+      - ETCD_LISTEN_PEER_URLS=http://0.0.0.0:2380
+      - ETCD_INITIAL_ADVERTISE_PEER_URLS=http://etcd0:2380
+      - ETCD_INITIAL_CLUSTER=etcd0=http://etcd0:2380,etcd1=http://etcd1:2380,etcd2=http://etcd2:2380
+      - ETCD_INITIAL_CLUSTER_TOKEN=etcd-cluster
+      - ETCD_INITIAL_CLUSTER_STATE=new
+    networks:
+      - etcd-net
+
+  etcd1:
+    image: quay.io/coreos/etcd:v3.5.12
+    ports:
+      - "2381:2379"  # client on different port to avoid collision
+      - "2382:2380"  # peer
+    environment:
+      - ETCD_NAME=etcd1
+      - ETCD_LISTEN_CLIENT_URLS=http://0.0.0.0:2379
+      - ETCD_ADVERTISE_CLIENT_URLS=http://localhost:2381
+      - ETCD_LISTEN_PEER_URLS=http://0.0.0.0:2380
+      - ETCD_INITIAL_ADVERTISE_PEER_URLS=http://etcd1:2380
+      - ETCD_INITIAL_CLUSTER=etcd0=http://etcd0:2380,etcd1=http://etcd1:2380,etcd2=http://etcd2:2380
+      - ETCD_INITIAL_CLUSTER_TOKEN=etcd-cluster
+      - ETCD_INITIAL_CLUSTER_STATE=new
+    networks:
+      - etcd-net
+
+  etcd2:
+    image: quay.io/coreos/etcd:v3.5.12
+    ports:
+      - "2383:2379"
+      - "2384:2380"
+    environment:
+      - ETCD_NAME=etcd2
+      - ETCD_LISTEN_CLIENT_URLS=http://0.0.0.0:2379
+      - ETCD_ADVERTISE_CLIENT_URLS=http://localhost:2383
+      - ETCD_LISTEN_PEER_URLS=http://0.0.0.0:2380
+      - ETCD_INITIAL_ADVERTISE_PEER_URLS=http://etcd2:2380
+      - ETCD_INITIAL_CLUSTER=etcd0=http://etcd0:2380,etcd1=http://etcd1:2380,etcd2=http://etcd2:2380
+      - ETCD_INITIAL_CLUSTER_TOKEN=etcd-cluster
+      - ETCD_INITIAL_CLUSTER_STATE=new
+    networks:
+      - etcd-net
+
+networks:
+  etcd-net:
+    driver: bridge

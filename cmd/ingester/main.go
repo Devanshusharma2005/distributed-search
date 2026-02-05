@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/md5"
 	"encoding/json"
 	"encoding/xml"
 	"flag"
 	"fmt"
+	"hash"
 	"log"
 	"os"
 	"strings"
@@ -29,7 +31,7 @@ type revision struct {
 
 const (
 	defaultWorkers = 8
-	defaultMaxDocs = 50000 
+	defaultMaxDocs = 50000 // cap for phase 1 : i am gonna bump to 0 later
 	batchSize      = 1000  
 	minBodyLen     = 50    
 	maxBodyLen     = 2000  
@@ -62,6 +64,8 @@ func cleanWikiText(raw string) string {
 	return strings.TrimSpace(text)
 }
 
+// N workers pulling the pages off the channel, cleaning the and pushing out the channel
+
 
 func worker(ctx context.Context, id int, in <-chan page, out chan<- model.Doc, counter *atomic.Int64) {
     log.Printf("[Worker %d] Starting...", id)
@@ -91,6 +95,18 @@ func worker(ctx context.Context, id int, in <-chan page, out chan<- model.Doc, c
 	}
 }
 
+func getShardStats(counters []int) string {
+	if len(counters) == 0 {
+		return "single file"
+	}
+	stats := make([]string, len(counters))
+	for i, c := range counters {
+		stats[i] = fmt.Sprintf("shard-%d:%d", i, c)
+	}
+	return strings.Join(stats, " ")
+}
+
+
 
 
 func main() {
@@ -98,10 +114,11 @@ func main() {
 	outputFile := flag.String("output", "docs.jsonl", "path to output JSONL file")
 	maxDocs := flag.Int("max-docs", defaultMaxDocs, "max docs to index (0 = no limit)")
 	numWorkers := flag.Int("workers", defaultWorkers, "number of parser worker goroutines")
+	numShards := flag.Int("num-shards", 0, "shard docs across N files (0 = unsharded single file)")
 	flag.Parse()
 
-	log.Printf("🚀 Starting ingester | input=%s output=%s max-docs=%d workers=%d",
-		*inputFile, *outputFile, *maxDocs, *numWorkers)
+	log.Printf("🚀 Starting ingester | input=%s output=%s max-docs=%d workers=%d num-shards=%d",
+		*inputFile, *outputFile, *maxDocs, *numWorkers, *numShards)
 
 	start := time.Now()
 
@@ -111,11 +128,58 @@ func main() {
 	}
 	defer f.Close()
 
-	out, err := os.Create(*outputFile)
-	if err != nil {
-		log.Fatalf("create output: %v", err)
+	// out, err := os.Create(*outputFile)
+	// if err != nil {
+	// 	log.Fatalf("create output: %v", err)
+	// }
+	// defer out.Close()
+    var shardFiles []*os.File
+	var shardEncs  []*json.Encoder
+	var shardCounters []int
+
+	if *numShards > 0 {
+		// sharded mode -> creating sharded files
+		log.Printf("Sharding across %d files...", *numShards)
+		shardFiles = make([]*os.File, *numShards)
+		shardEncs = make([]*json.Encoder, *numShards)
+		shardCounters = make([]int, *numShards)
+        
+		for i := 0; i < *numShards ; i++ {
+			shardPath := fmt.Sprintf("shard-%d.jsonl", i)
+			sf, err := os.Create(shardPath)
+			if err != nil {
+				log.Fatalf("Create %s: %v", shardPath, err)
+			}
+			shardFiles[i] = sf
+			shardEncs[i] = json.NewEncoder(sf)
+			defer sf.Close()
+		}
+	} else {
+		// unsharded mode (backward compatability with monolith)
+		out, err := os.Create(*outputFile)
+		if err != nil {
+			log.Fatalf("create output: %v", err)
+		}
+		defer out.Close()
+
+		shardFiles = []*os.File{out}
+		shardEncs = []*json.Encoder{json.NewEncoder(out)}
+		shardCounters = []int{0}
 	}
-	defer out.Close()
+
+	// MD5 hash based shard routing
+
+	var hasher hash.Hash = md5.New()
+	shardDoc := func(docID string) int {
+		if *numShards == 0 {
+			return 0 // unsharded mode
+		}
+		hasher.Reset()
+		hasher.Write([]byte(docID))
+		hashBytes := hasher.Sum(nil)
+		return int(hashBytes[0]) % *numShards
+	}
+
 
 	pageCh := make(chan page, 512)
 	docCh := make(chan model.Doc, 512)
@@ -179,36 +243,45 @@ func main() {
 		log.Printf("📄 Reader finished. Total pages pulled from XML: %d", pagesRead)
 	}()
 
-	enc := json.NewEncoder(out)
 	batch := make([]model.Doc, 0, batchSize)
 	var totalWritten int
 
 	for doc := range docCh {
 		batch = append(batch, doc)
-
 		if len(batch) >= batchSize {
+			// writing batch to appropriate shard files
 			for _, d := range batch {
-				if err := enc.Encode(d); err != nil {
-					log.Printf("⚠️  encode error: %v", err)
+				shardID := shardDoc(d.ID)
+				shardCounters[shardID]++;
+				if err := shardEncs[shardID].Encode(d); err != nil {
+					log.Printf("encode shard-%d: %v", shardID, err)
 				}
 			}
 			totalWritten += len(batch)
-			batch = batch[:0] 
+			batch = batch[:0]
 
 			if totalWritten%5000 == 0 {
-				log.Printf("✍️  Wrote %d docs to %s...", totalWritten, *outputFile)
+				log.Printf(" Wrote %d docs | %s", totalWritten, getShardStats(shardCounters))
 			}
 		}
 	}
 
+	// last batch is always < batchsize (this is kinda edge case)
+
 	for _, d := range batch {
-		if err := enc.Encode(d); err != nil {
-			log.Printf("⚠️  encode error: %v", err)
+		shardID := shardDoc(d.ID)
+		shardCounters[shardID]++;
+		if err := shardEncs[shardID].Encode(d); err != nil {
+			log.Printf(" encode shard-%d: %v", shardID, err)
 		}
 	}
-	totalWritten += len(batch)
 
+	totalWritten += len(batch)
 	elapsed := time.Since(start)
-	log.Printf("✅ Done! %d docs indexed in %v (%.0f docs/sec) → %s",
-		totalWritten, elapsed, float64(totalWritten)/elapsed.Seconds(), *outputFile)
+
+	log.Printf(" Done! %d docs indexed in %v (%.0f docs/sec)", totalWritten, elapsed, float64(totalWritten)/elapsed.Seconds())
+
+	if *numShards > 0 {
+		log.Printf("Shard distribution: %s", getShardStats(shardCounters))
+	}
 }

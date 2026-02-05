@@ -1,13 +1,16 @@
 data.xml
+*.xml
 enwiki*
 *.gz
 *.bz2
 distributed-search
-data.xml
-enwiki*
-*.gz
-*.bz2
 .DS_Store
+# Go binaries
+/bin/
+/dist/
+*.exe
+*.out
+*.test
 
 # Bleve index data
 *.bleve/
@@ -18,4 +21,16 @@ results.bin
 # Go binaries
 searcher
 indexer
+
+# Ingested shard outputs
+shard-*.jsonl
+docs.jsonl
+# Docker
+.env
+docker/.env
+# Logs
+*.log
+
+
+
 
