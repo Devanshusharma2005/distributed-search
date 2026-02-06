@@ -31,6 +31,7 @@ coordinator
 # Docker
 .env
 docker/.env
+dump.*
 # Logs
 *.log
 # Ignore the compiled indexer binary
