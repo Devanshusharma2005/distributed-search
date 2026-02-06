@@ -26,6 +26,8 @@ indexer
 shard-*.jsonl
 docs.jsonl
 shard-server
+coord
+coordinator
 # Docker
 .env
 docker/.env
