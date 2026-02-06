@@ -36,7 +36,6 @@ func init() {
 	ctx = context.Background()
 }
 
-// ShardHit represents a single result from a shard
 type ShardHit struct {
 	ID    string  `json:"id"`
 	Score float64 `json:"score"`
@@ -44,7 +43,6 @@ type ShardHit struct {
 	Shard string  `json:"shard,omitempty"`
 }
 
-// CoordinatorResponse is the merged response sent to the client
 type CoordinatorResponse struct {
 	Query     string     `json:"query"`
 	Shards    int        `json:"shards"`
@@ -56,12 +54,10 @@ type CoordinatorResponse struct {
 func main() {
 	flag.Parse()
 
-	// Initialize Redis client
 	rdb = redis.NewClient(&redis.Options{
 		Addr: *redisAddr,
 	})
 
-	// Test Redis connection
 	if err := rdb.Ping(ctx).Err(); err != nil {
 		log.Printf("⚠️  Redis not available at %s: %v (cache disabled)", *redisAddr, err)
 		rdb = nil
@@ -83,7 +79,6 @@ func main() {
 	log.Fatal(http.ListenAndServe(":"+strconv.Itoa(*port), r))
 }
 
-// coordSearchHandler handles /search?q=... requests with Redis cache
 func coordSearchHandler(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
@@ -101,11 +96,9 @@ func coordSearchHandler(w http.ResponseWriter, r *http.Request) {
 	// CACHE KEY: "search:<query>:<limit>"
 	cacheKey := fmt.Sprintf("search:%s:%d", q, qLimit)
 
-	// 1. CACHE LOOKUP (if Redis is available)
 	if rdb != nil {
 		cached, err := rdb.Get(ctx, cacheKey).Result()
 		if err == nil {
-			// CACHE HIT - return immediately (~1ms)
 			log.Printf("✅ CACHE HIT: %s", cacheKey)
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-Cache", "HIT")
@@ -114,15 +107,12 @@ func coordSearchHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// CACHE MISS - set lock to prevent thundering herd
 		lockKey := cacheKey + ":lock"
 		locked, _ := rdb.SetNX(ctx, lockKey, "1", 2*time.Second).Result()
 		if locked {
-			// This request won the race - populate cache
 			defer rdb.Del(ctx, lockKey)
 			log.Printf("🔄 CACHE MISS + LOCK: %s", cacheKey)
 		} else {
-			// Another request is populating - wait briefly and retry
 			time.Sleep(50 * time.Millisecond)
 			cached, _ := rdb.Get(ctx, cacheKey).Result()
 			if cached != "" {
@@ -133,11 +123,9 @@ func coordSearchHandler(w http.ResponseWriter, r *http.Request) {
 				w.Write([]byte(cached))
 				return
 			}
-			// If still not there, fall through to backend query
 		}
 	}
 
-	// 2. BACKEND QUERY - discover shards from etcd
 	shards, err := discoverShards()
 	if err != nil || len(shards) == 0 {
 		http.Error(w, fmt.Sprintf(`{"error": "no shards available: %v"}`, err), http.StatusServiceUnavailable)
@@ -146,14 +134,11 @@ func coordSearchHandler(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("📡 Fan-out to %d shards for q='%s' limit=%d", len(shards), q, qLimit)
 
-	// 3. Fan out queries to all shards in parallel
-	perShardLimit := qLimit * 3 // overfetch for better global top-K
+	perShardLimit := qLimit * 3 
 	shardHits := fanoutQuery(shards, q, perShardLimit)
 
-	// 4. Global top-K merge
 	topHits := mergeTopK(shardHits, qLimit)
 
-	// 5. Build response
 	resp := CoordinatorResponse{
 		Query:     q,
 		Shards:    len(shards),
@@ -164,7 +149,6 @@ func coordSearchHandler(w http.ResponseWriter, r *http.Request) {
 
 	resultJSON, _ := json.Marshal(resp)
 
-	// 6. CACHE POPULATE (if Redis is available)
 	if rdb != nil {
 		rdb.SetEx(ctx, cacheKey, resultJSON, cacheTTL)
 		log.Printf("✅ BACKEND + CACHED: %s (%v)", cacheKey, time.Since(start))
@@ -180,7 +164,6 @@ func coordSearchHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("✅ Coordinator: '%s' → %d hits from %d shards in %v", q, len(topHits), len(shards), time.Since(start))
 }
 
-// discoverShards queries etcd for /shards/active/* and returns list of shard addresses
 func discoverShards() ([]string, error) {
 	cli, err := clientv3.New(clientv3.Config{
 		Endpoints:   strings.Split(*etcdEps, ","),
@@ -209,7 +192,6 @@ func discoverShards() ([]string, error) {
 	return shards, nil
 }
 
-// fanoutQuery sends query to all shards in parallel and collects results
 func fanoutQuery(shards []string, q string, perShardLimit int) []ShardHit {
 	var wg sync.WaitGroup
 	hitsCh := make(chan ShardHit, len(shards)*perShardLimit)
@@ -225,13 +207,11 @@ func fanoutQuery(shards []string, q string, perShardLimit int) []ShardHit {
 		}(shardAddr)
 	}
 
-	// Close channel once all goroutines finish
 	go func() {
 		wg.Wait()
 		close(hitsCh)
 	}()
 
-	// Collect all hits
 	allHits := make([]ShardHit, 0, len(shards)*perShardLimit)
 	for hit := range hitsCh {
 		allHits = append(allHits, hit)
@@ -240,7 +220,6 @@ func fanoutQuery(shards []string, q string, perShardLimit int) []ShardHit {
 	return allHits
 }
 
-// queryShard sends HTTP request to a single shard and parses Bleve response
 func queryShard(shardAddr, q string, limit int) []ShardHit {
 	queryURL := fmt.Sprintf("http://%s/search?q=%s&limit=%d",
 		shardAddr, url.QueryEscape(q), limit)
@@ -283,7 +262,6 @@ func queryShard(shardAddr, q string, limit int) []ShardHit {
 	return hits
 }
 
-// mergeTopK sorts all hits by score and returns top K
 func mergeTopK(allHits []ShardHit, k int) []ShardHit {
 	sort.Slice(allHits, func(i, j int) bool {
 		return allHits[i].Score > allHits[j].Score
@@ -295,7 +273,6 @@ func mergeTopK(allHits []ShardHit, k int) []ShardHit {
 	return allHits[:k]
 }
 
-// getString safely extracts string from interface{}
 func getString(v interface{}) string {
 	if s, ok := v.(string); ok {
 		return s
@@ -303,7 +280,6 @@ func getString(v interface{}) string {
 	return ""
 }
 
-// listShardsHandler shows currently active shards
 func listShardsHandler(w http.ResponseWriter, r *http.Request) {
 	shards, err := discoverShards()
 	if err != nil {
@@ -317,3 +293,4 @@ func listShardsHandler(w http.ResponseWriter, r *http.Request) {
 		"count":  len(shards),
 	})
 }
+
