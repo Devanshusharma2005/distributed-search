@@ -25,6 +25,7 @@ indexer
 # Ingested shard outputs
 shard-*.jsonl
 docs.jsonl
+shard-server
 # Docker
 .env
 docker/.env
@@ -36,7 +37,6 @@ indexer-bin
 # Ignore all bleve index directories (monolith and shards)
 search.bleve*
 
-Ignore all local executables (optional but recommended)
 *.test
 __debug_bin
 

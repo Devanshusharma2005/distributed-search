@@ -1,13 +1,20 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
 	"strconv"
+	"strings"
+	"syscall"
 	"time"
 
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"github.com/Devanshusharma2005/distributed-search/internal/index"
 	"github.com/blevesearch/bleve/v2"
 	"github.com/gorilla/mux"
@@ -15,19 +22,17 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-// we'll need this for grafana later;
-
 var (
 	queryLatency = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "search_query_latency_seconds",
 		Help:    "Search query latency distribution",
-		Buckets: prometheus.DefBuckets, // 0.005, 0.01, 0.025, 0.05, ... 10
-	}, []string{"status"})
+		Buckets: prometheus.DefBuckets,
+	}, []string{"status", "shard"})
 
 	queriesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "search_queries_total",
 		Help: "Total search queries processed",
-	}, []string{"status"})
+	}, []string{"status", "shard"})
 )
 
 func init() {
@@ -35,45 +40,142 @@ func init() {
 	prometheus.MustRegister(queriesTotal)
 }
 
+var (
+	shardID   = flag.Int("shard-id", -1, "shard ID (-1 = no etcd registration, single-node mode)")
+	port      = flag.Int("port", 8080, "HTTP port")
+	etcdEps   = flag.String("etcd", "localhost:2379,localhost:2381,localhost:2383", "etcd endpoints (comma-separated)")
+	indexBase = flag.String("index", "search.bleve", "base index path")
+)
 
 func main() {
-	indexPath := flag.String("index", "search.bleve", "path to Bleve index")
-	port := flag.String("port", "8080", "HTTP server port")
 	flag.Parse()
 
-	idx, err := index.NewIndexer(*indexPath)
+	indexPath := *indexBase
+	if *shardID >= 0 {
+		indexPath = fmt.Sprintf("%s-%d", *indexBase, *shardID)
+	}
+
+	idx, err := index.NewIndexer(indexPath)
 	if err != nil {
-		log.Fatalf("❌ load index: %v", err)
+		log.Fatalf("❌ load index %s: %v", indexPath, err)
 	}
 	defer idx.Close()
 
-	// Log index stats
-	count, _ := idx.Index.DocCount()
-	log.Printf("🚀 Searcher ready at :%s | %d docs indexed", *port, count)
+	docCount, _ := idx.Index.DocCount()
+	log.Printf("🚀 Shard service ready :%d (index=%s, docs=%d)", *port, indexPath, docCount)
 
-	// Routes
+	// etcd registration (only in shard mode)
+	var cancelReg context.CancelFunc
+	if *shardID >= 0 {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancelReg = cancel
+		go registerShard(ctx, *shardID, *port, *etcdEps)
+		log.Printf("🔗 Starting etcd registration for shard-%d...", *shardID)
+	}
+
 	r := mux.NewRouter()
-	r.HandleFunc("/search", searchHandler(idx.Index)).Methods("GET")
+	r.HandleFunc("/search", searchHandler(idx.Index, *shardID)).Methods("GET")
 	r.Handle("/metrics", promhttp.Handler())
-	r.HandleFunc("/health", healthHandler).Methods("GET")
+	r.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	}).Methods("GET")
 
-	log.Fatal(http.ListenAndServe(":"+*port, r))
+	srv := &http.Server{
+		Addr:    ":" + strconv.Itoa(*port),
+		Handler: r,
+	}
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		log.Printf("🌐 HTTP listening on :%d", *port)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("❌ HTTP server: %v", err)
+		}
+	}()
+
+	<-quit
+	log.Println("🛑 Shutdown signal received...")
+	if cancelReg != nil {
+		cancelReg()
+	}
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+	srv.Shutdown(shutdownCtx)
+
+	log.Println("👋 Shard service stopped")
 }
 
+func registerShard(ctx context.Context, shardID, port int, etcdEps string) {
+	eps := strings.Split(etcdEps, ",")
 
-// searchHandler — the meat of Phase 1 Milestone 4.
-// Takes a "q" query param, runs BM25 search, returns JSON with highlights.
+	cli, err := clientv3.New(clientv3.Config{
+		Endpoints:   eps,
+		DialTimeout: 5 * time.Second,
+	})
+	if err != nil {
+		log.Fatalf("❌ etcd connect: %v", err)
+	}
+	defer cli.Close()
 
-func searchHandler(index bleve.Index) http.HandlerFunc {
+	// Create a 30-second TTL lease
+	lease, err := cli.Grant(ctx, 30)
+	if err != nil {
+		log.Fatalf("❌ etcd lease: %v", err)
+	}
+
+	shardAddr := fmt.Sprintf("localhost:%d", port)
+	key := fmt.Sprintf("/shards/active/%d", shardID)
+
+	// Register shard with the lease
+	_, err = cli.Put(ctx, key, shardAddr, clientv3.WithLease(lease.ID))
+	if err != nil {
+		log.Fatalf("❌ etcd put %s: %v", key, err)
+	}
+
+	// Keep lease alive (auto-renew every 10s)
+	ch, kaErr := cli.KeepAlive(ctx, lease.ID)
+	if kaErr != nil {
+		log.Fatalf("❌ etcd keepalive: %v", kaErr)
+	}
+
+	log.Printf("✅ Shard-%d registered: %s → %s (lease=%d)", shardID, key, shardAddr, lease.ID)
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("🔌 Shard-%d deregistering from etcd...", shardID)
+			return
+		case ka, ok := <-ch:
+			if !ok {
+				log.Printf("⚠️  Keepalive channel closed for shard-%d", shardID)
+				return
+			}
+			if ka == nil {
+				log.Printf("⚠️  Keepalive failed for shard-%d, lease expired", shardID)
+				return
+			}
+		}
+	}
+}
+
+//  handling /search?q=... requests for this shard
+func searchHandler(idx bleve.Index, shardID int) http.HandlerFunc {
+	shardLabel := "single"
+	if shardID >= 0 {
+		shardLabel = fmt.Sprintf("shard-%d", shardID)
+	}
+
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 
-		// Extract query
 		q := r.URL.Query().Get("q")
 		if q == "" {
 			http.Error(w, `{"error": "missing 'q' parameter"}`, http.StatusBadRequest)
-			queriesTotal.WithLabelValues("error").Inc()
-			queryLatency.WithLabelValues("error").Observe(time.Since(start).Seconds())
+			queriesTotal.WithLabelValues("error", shardLabel).Inc()
+			queryLatency.WithLabelValues("error", shardLabel).Observe(time.Since(start).Seconds())
 			return
 		}
 
@@ -82,38 +184,28 @@ func searchHandler(index bleve.Index) http.HandlerFunc {
 			limit = 20
 		}
 
-		
+		// Build Bleve search request
 		query := bleve.NewQueryStringQuery(q)
-		searchReq := bleve.NewSearchRequest(query)
-		searchReq.Size = limit
-		searchReq.Fields = []string{"title", "body"} 
-		searchReq.Highlight = bleve.NewHighlight()  
+		req := bleve.NewSearchRequest(query)
+		req.Size = limit
+		req.Fields = []string{"title", "body"}
+		req.Highlight = bleve.NewHighlight()
 
-		
-		res, err := index.Search(searchReq)
+		// Executing the  search
+		res, err := idx.Search(req)
 		if err != nil {
 			http.Error(w, `{"error": "`+err.Error()+`"}`, http.StatusInternalServerError)
-			queriesTotal.WithLabelValues("error").Inc()
-			queryLatency.WithLabelValues("error").Observe(time.Since(start).Seconds())
+			queriesTotal.WithLabelValues("error", shardLabel).Inc()
+			queryLatency.WithLabelValues("error", shardLabel).Observe(time.Since(start).Seconds())
 			return
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(res)
 
-		// Metrics
-		queriesTotal.WithLabelValues("success").Inc()
-		queryLatency.WithLabelValues("success").Observe(time.Since(start).Seconds())
+		queriesTotal.WithLabelValues("success", shardLabel).Inc()
+		queryLatency.WithLabelValues("success", shardLabel).Observe(time.Since(start).Seconds())
 
-		log.Printf("✅ '%s' → %d hits in %v", q, len(res.Hits), time.Since(start))
+		log.Printf("✅ '%s' → %d hits in %v (shard=%s)", q, len(res.Hits), time.Since(start), shardLabel)
 	}
-}
-
-
-// healthHandler (we gonna need this later)
-
-
-func healthHandler(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("OK"))
 }
