@@ -168,7 +168,6 @@ func main() {
 	}
 
 	// MD5 hash based shard routing
-
 	var hasher hash.Hash = md5.New()
 	shardDoc := func(docID string) int {
 		if *numShards == 0 {

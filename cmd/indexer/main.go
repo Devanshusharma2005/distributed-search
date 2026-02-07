@@ -23,7 +23,6 @@ func main() {
 	)
 	flag.Parse()
 
-	// Computing the final index path based on shard mode
 	finalIndexPath := *indexPath
 	if *shardID >= 0 {
 		finalIndexPath = fmt.Sprintf("%s-%d", *indexPath, *shardID)

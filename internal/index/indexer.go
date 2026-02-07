@@ -20,7 +20,7 @@ type Indexer struct {
 }
 
 func NewIndexer(indexPath string) (*Indexer, error) {
-	// Bleve auto-handles your JSON struct fields PERFECTLY with defaults
+	// Bleve auto-handles the JSON struct fields PERFECTLY with defaults
 	mapping := bleve.NewIndexMapping()
 
 	index, err := bleve.Open(indexPath)
@@ -72,8 +72,7 @@ func (idx *Indexer) IndexJSONL(ctx context.Context, jsonlPath string, batchSize 
 			skipped++
 			continue
 		}
-
-		// Bleve auto-indexes ALL JSON fields (title, body, id) - PERFECT!
+      // batching. Useful for I/O operations
 		batch.Index(doc.ID, doc)
 		indexed++
 

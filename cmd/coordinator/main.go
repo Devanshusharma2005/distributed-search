@@ -348,7 +348,6 @@ func mergeTopK(allHits []ShardHit, k int) []ShardHit {
 	return allHits[:k]
 }
 
-// getString safely extracts string from interface{}
 func getString(v interface{}) string {
 	if s, ok := v.(string); ok {
 		return s

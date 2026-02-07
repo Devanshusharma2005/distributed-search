@@ -58,7 +58,7 @@ func main() {
 		indexPath = fmt.Sprintf("%s-%d", *indexBase, *shardID)
 	}
 
-	// Load the shard's index
+	// Load the shard's index 
 	idx, err := index.NewIndexer(indexPath)
 	if err != nil {
 		log.Fatalf("❌ load index %s: %v", indexPath, err)
@@ -166,12 +166,11 @@ func registerShard(ctx context.Context, shardID, port int, hostname, etcdEps str
 				log.Printf("⚠️  Keepalive failed for shard-%d, lease expired", shardID)
 				return
 			}
-			// Heartbeat received successfully (silent, happens every ~10s)
 		}
 	}
 }
 
-// searchHandler handles /search?q=... requests for this shard
+// This is the main concrete function -> searchHandler handles /search?q=... requests for this shard
 func searchHandler(idx bleve.Index, shardID int) http.HandlerFunc {
 	shardLabel := "single"
 	if shardID >= 0 {
@@ -194,14 +193,13 @@ func searchHandler(idx bleve.Index, shardID int) http.HandlerFunc {
 			limit = 20
 		}
 
-		// Build Bleve search request
+		// Here i am using bleve indexing library
 		query := bleve.NewQueryStringQuery(q)
 		req := bleve.NewSearchRequest(query)
 		req.Size = limit
 		req.Fields = []string{"title", "body"}
 		req.Highlight = bleve.NewHighlight()
 
-		// Execute search
 		res, err := idx.Search(req)
 		if err != nil {
 			http.Error(w, `{"error": "`+err.Error()+`"}`, http.StatusInternalServerError)
@@ -210,11 +208,9 @@ func searchHandler(idx bleve.Index, shardID int) http.HandlerFunc {
 			return
 		}
 
-		// Return results as JSON
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(res)
 
-		// Metrics
 		queriesTotal.WithLabelValues("success", shardLabel).Inc()
 		queryLatency.WithLabelValues("success", shardLabel).Observe(time.Since(start).Seconds())
 
