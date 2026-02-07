@@ -1,48 +1,43 @@
-data.xml
-*.xml
-enwiki*
-*.gz
-*.bz2
-distributed-search
-.DS_Store
-# Go binaries
+# --- Binaries & Executables ---
+/coord
+/coordinator
+/shard-server
+/searcher
+/indexer
+/indexer-bin
+__debug_bin
 /bin/
 /dist/
 *.exe
 *.out
 *.test
 
-# Bleve index data
+# --- Data & Indexing (Bleve/Monolith/Shards) ---
 *.bleve/
-
-# Load test results
-results.bin
-
-# Go binaries
-searcher
-indexer
-
-# Ingested shard outputs
+search.bleve*
 shard-*.jsonl
 docs.jsonl
-shard-server
-coord
-coordinator
-# Docker
+*.xml
+enwiki*
+*.gz
+*.bz2
+
+# --- Docker & Infrastructure Local Data ---
+# Very Important: Prevents committing your local database state
 .env
 docker/.env
-dump.*
-# Logs
+dump.rdb
+dump.aof
+data/
+default.etcd/
 *.log
-# Ignore the compiled indexer binary
-indexer-bin
 
-# Ignore all bleve index directories (monolith and shards)
-search.bleve*
+# --- System & IDE ---
+.DS_Store
+.idea/
+.vscode/
+*.swp
 
-*.test
-__debug_bin
-
-
-
-
+# --- Test & Benchmarking ---
+results.bin
+*.prof

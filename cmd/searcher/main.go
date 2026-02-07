@@ -22,6 +22,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
+// Prometheus metrics with shard labels
 var (
 	queryLatency = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "search_query_latency_seconds",
@@ -43,6 +44,7 @@ func init() {
 var (
 	shardID   = flag.Int("shard-id", -1, "shard ID (-1 = no etcd registration, single-node mode)")
 	port      = flag.Int("port", 8080, "HTTP port")
+	hostname  = flag.String("hostname", "localhost", "hostname to register in etcd (use container name in Docker)")
 	etcdEps   = flag.String("etcd", "localhost:2379,localhost:2381,localhost:2383", "etcd endpoints (comma-separated)")
 	indexBase = flag.String("index", "search.bleve", "base index path")
 )
@@ -50,11 +52,13 @@ var (
 func main() {
 	flag.Parse()
 
+	// Compute shard-specific index path
 	indexPath := *indexBase
 	if *shardID >= 0 {
 		indexPath = fmt.Sprintf("%s-%d", *indexBase, *shardID)
 	}
 
+	// Load the shard's index
 	idx, err := index.NewIndexer(indexPath)
 	if err != nil {
 		log.Fatalf("❌ load index %s: %v", indexPath, err)
@@ -69,10 +73,11 @@ func main() {
 	if *shardID >= 0 {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancelReg = cancel
-		go registerShard(ctx, *shardID, *port, *etcdEps)
+		go registerShard(ctx, *shardID, *port, *hostname, *etcdEps)
 		log.Printf("🔗 Starting etcd registration for shard-%d...", *shardID)
 	}
 
+	// HTTP server setup
 	r := mux.NewRouter()
 	r.HandleFunc("/search", searchHandler(idx.Index, *shardID)).Methods("GET")
 	r.Handle("/metrics", promhttp.Handler())
@@ -86,6 +91,7 @@ func main() {
 		Handler: r,
 	}
 
+	// Graceful shutdown
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
@@ -109,7 +115,8 @@ func main() {
 	log.Println("👋 Shard service stopped")
 }
 
-func registerShard(ctx context.Context, shardID, port int, etcdEps string) {
+// registerShard registers this shard in etcd with a keepalive lease
+func registerShard(ctx context.Context, shardID, port int, hostname, etcdEps string) {
 	eps := strings.Split(etcdEps, ",")
 
 	cli, err := clientv3.New(clientv3.Config{
@@ -127,7 +134,7 @@ func registerShard(ctx context.Context, shardID, port int, etcdEps string) {
 		log.Fatalf("❌ etcd lease: %v", err)
 	}
 
-	shardAddr := fmt.Sprintf("localhost:%d", port)
+	shardAddr := fmt.Sprintf("%s:%d", hostname, port)
 	key := fmt.Sprintf("/shards/active/%d", shardID)
 
 	// Register shard with the lease
@@ -143,6 +150,8 @@ func registerShard(ctx context.Context, shardID, port int, etcdEps string) {
 	}
 
 	log.Printf("✅ Shard-%d registered: %s → %s (lease=%d)", shardID, key, shardAddr, lease.ID)
+
+	// Heartbeat loop - keeps the lease alive until context is cancelled
 	for {
 		select {
 		case <-ctx.Done():
@@ -157,11 +166,12 @@ func registerShard(ctx context.Context, shardID, port int, etcdEps string) {
 				log.Printf("⚠️  Keepalive failed for shard-%d, lease expired", shardID)
 				return
 			}
+			// Heartbeat received successfully (silent, happens every ~10s)
 		}
 	}
 }
 
-//  handling /search?q=... requests for this shard
+// searchHandler handles /search?q=... requests for this shard
 func searchHandler(idx bleve.Index, shardID int) http.HandlerFunc {
 	shardLabel := "single"
 	if shardID >= 0 {
@@ -191,7 +201,7 @@ func searchHandler(idx bleve.Index, shardID int) http.HandlerFunc {
 		req.Fields = []string{"title", "body"}
 		req.Highlight = bleve.NewHighlight()
 
-		// Executing the  search
+		// Execute search
 		res, err := idx.Search(req)
 		if err != nil {
 			http.Error(w, `{"error": "`+err.Error()+`"}`, http.StatusInternalServerError)
@@ -200,9 +210,11 @@ func searchHandler(idx bleve.Index, shardID int) http.HandlerFunc {
 			return
 		}
 
+		// Return results as JSON
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(res)
 
+		// Metrics
 		queriesTotal.WithLabelValues("success", shardLabel).Inc()
 		queryLatency.WithLabelValues("success", shardLabel).Observe(time.Since(start).Seconds())
 

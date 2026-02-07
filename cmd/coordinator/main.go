@@ -294,7 +294,6 @@ func fanoutQueryParallel(shards []string, q string, perShardLimit int) []ShardHi
 	return allHits
 }
 
-// queryShard sends HTTP request to a single shard
 func queryShard(shardAddr, q string, limit int) []ShardHit {
 	queryURL := fmt.Sprintf("http://%s/search?q=%s&limit=%d",
 		shardAddr, url.QueryEscape(q), limit)
@@ -357,7 +356,6 @@ func getString(v interface{}) string {
 	return ""
 }
 
-// listShardsHandler shows currently active shards
 func listShardsHandler(w http.ResponseWriter, r *http.Request) {
 	shards, err := discoverShards()
 	if err != nil {
@@ -397,7 +395,6 @@ func listHotTermsHandler(w http.ResponseWriter, r *http.Request) {
 		key := string(kv.Key)
 		value := string(kv.Value)
 
-		// Parse /hot_terms/go/shards → term="go", field="shards"
 		parts := strings.Split(strings.TrimPrefix(key, "/hot_terms/"), "/")
 		if len(parts) == 2 {
 			term := parts[0]
