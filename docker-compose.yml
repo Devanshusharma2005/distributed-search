@@ -1,18 +1,11 @@
 version: '3.8'
 
-# Distributed Search System - Production Ready
-# One command: docker compose up
-# Access: http://localhost:8090/search?q=distributed
-
 services:
-  # ==========================================================================
-  # ETCD CLUSTER (3 nodes for fault tolerance)
-  # ==========================================================================
+  # ETCD Cluster
   etcd0:
     image: quay.io/coreos/etcd:v3.5.12
     container_name: etcd0
     environment:
-      - ETCDCTL_API=3
       - ETCD_NAME=etcd0
       - ETCD_LISTEN_CLIENT_URLS=http://0.0.0.0:2379
       - ETCD_ADVERTISE_CLIENT_URLS=http://etcd0:2379
@@ -22,20 +15,14 @@ services:
       - ETCD_INITIAL_CLUSTER_TOKEN=search-cluster
       - ETCD_INITIAL_CLUSTER_STATE=new
     ports:
-      - "2381:2379"
+      - "2379:2379"
     networks:
       - search-net
-    healthcheck:
-      test: ["CMD", "etcdctl", "--endpoints=http://127.0.0.1:2379", "endpoint", "health"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
 
   etcd1:
     image: quay.io/coreos/etcd:v3.5.12
     container_name: etcd1
     environment:
-      - ETCDCTL_API=3
       - ETCD_NAME=etcd1
       - ETCD_LISTEN_CLIENT_URLS=http://0.0.0.0:2379
       - ETCD_ADVERTISE_CLIENT_URLS=http://etcd1:2379
@@ -46,17 +33,11 @@ services:
       - ETCD_INITIAL_CLUSTER_STATE=new
     networks:
       - search-net
-    healthcheck:
-      test: ["CMD", "etcdctl",  "endpoint", "health", "--cluster"]
-      interval: 5s
-      timeout: 5s
-      retries: 3
 
   etcd2:
     image: quay.io/coreos/etcd:v3.5.12
     container_name: etcd2
     environment:
-      - ETCDCTL_API=3
       - ETCD_NAME=etcd2
       - ETCD_LISTEN_CLIENT_URLS=http://0.0.0.0:2379
       - ETCD_ADVERTISE_CLIENT_URLS=http://etcd2:2379
@@ -67,34 +48,28 @@ services:
       - ETCD_INITIAL_CLUSTER_STATE=new
     networks:
       - search-net
-    healthcheck:
-      test: ["CMD", "etcdctl",  "endpoint", "health", "--cluster"]
-      interval: 5s
-      timeout: 5s
-      retries: 3
 
-  # ==========================================================================
-  # REDIS CACHE
-  # ==========================================================================
   redis:
     image: redis:7-alpine
     container_name: redis
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
     ports:
       - "6379:6379"
     networks:
       - search-net
-    healthcheck:
-      # Using redis-cli ping is the standard way to check health
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
 
-  # ==========================================================================
-  # SHARD SERVICES (8 instances)
-  # CRITICAL: Each shard registers with its container name (shard-N:8080)
-  # Index path is base path - the -N suffix is added by --shard-id flag
-  # ==========================================================================
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    networks:
+      - search-net
+    restart: unless-stopped
+
+  # Shards
   shard-0:
     build:
       context: .
@@ -111,17 +86,9 @@ services:
     networks:
       - search-net
     depends_on:
-      etcd0:
-        condition: service_healthy
-      etcd1:
-        condition: service_healthy
-      etcd2:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
+      - etcd0
+      - etcd1
+      - etcd2
 
   shard-1:
     build:
@@ -139,17 +106,7 @@ services:
     networks:
       - search-net
     depends_on:
-      etcd0:
-        condition: service_healthy
-      etcd1:
-        condition: service_healthy
-      etcd2:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
+      - etcd0
 
   shard-2:
     build:
@@ -167,17 +124,7 @@ services:
     networks:
       - search-net
     depends_on:
-      etcd0:
-        condition: service_healthy
-      etcd1:
-        condition: service_healthy
-      etcd2:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
+      - etcd0
 
   shard-3:
     build:
@@ -195,17 +142,7 @@ services:
     networks:
       - search-net
     depends_on:
-      etcd0:
-        condition: service_healthy
-      etcd1:
-        condition: service_healthy
-      etcd2:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
+      - etcd0
 
   shard-4:
     build:
@@ -223,17 +160,7 @@ services:
     networks:
       - search-net
     depends_on:
-      etcd0:
-        condition: service_healthy
-      etcd1:
-        condition: service_healthy
-      etcd2:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
+      - etcd0
 
   shard-5:
     build:
@@ -251,17 +178,7 @@ services:
     networks:
       - search-net
     depends_on:
-      etcd0:
-        condition: service_healthy
-      etcd1:
-        condition: service_healthy
-      etcd2:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
+      - etcd0
 
   shard-6:
     build:
@@ -279,17 +196,7 @@ services:
     networks:
       - search-net
     depends_on:
-      etcd0:
-        condition: service_healthy
-      etcd1:
-        condition: service_healthy
-      etcd2:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
+      - etcd0
 
   shard-7:
     build:
@@ -307,21 +214,8 @@ services:
     networks:
       - search-net
     depends_on:
-      etcd0:
-        condition: service_healthy
-      etcd1:
-        condition: service_healthy
-      etcd2:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
+      - etcd0
 
-  # ==========================================================================
-  # COORDINATOR (Query Router with Hot-Term Routing)
-  # ==========================================================================
   coordinator:
     build:
       context: .
@@ -332,64 +226,28 @@ services:
     networks:
       - search-net
     depends_on:
-      etcd0:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      shard-0:
-        condition: service_started
-      shard-1:
-        condition: service_started
-      shard-2:
-        condition: service_started
-      shard-3:
-        condition: service_started
-      shard-4:
-        condition: service_started
-      shard-5:
-        condition: service_started
-      shard-6:
-        condition: service_started
-      shard-7:
-        condition: service_started
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8090/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
+      - etcd0
+      - redis
+      - ollama
 
-  # ==========================================================================
-  # SETUP SERVICE (Seed hot terms in etcd)
-  # Runs once on startup
-  # ==========================================================================
   setup:
-    image: alpine:latest
+    image: quay.io/coreos/etcd:v3.5.12
     container_name: setup
     networks:
       - search-net
     depends_on:
-      etcd0:
-        condition: service_healthy
-    environment:
-      - ETCDCTL_API=3
-    command:
-      - /bin/sh
-      - -c
-      - |
-        # Install etcd-ctl (the client) inside the Alpine container
-        apk add --no-cache etcd-ctl
-        
-        echo "Waiting for cluster stabilization..."
-        sleep 10
-        
-        # Configure the hot terms
-        etcdctl --endpoints=http://etcd0:2379 put /hot_terms/distributed/shards "0,1"
-        etcdctl --endpoints=http://etcd0:2379 put /hot_terms/go/shards "2,3"
-        etcdctl --endpoints=http://etcd0:2379 put /hot_terms/python/shards "0,2"
-        
-        echo "✅ Hot terms configured"
+      - etcd0
+    command: 
+      - "etcdctl"
+      - "--endpoints=http://etcd0:2379"
+      - "put"
+      - "/hot_terms/distributed/shards"
+      - "0,1"
     restart: "no"
 
 networks:
   search-net:
     driver: bridge
+
+volumes:
+  ollama-data:

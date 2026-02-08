@@ -17,6 +17,8 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"github.com/gorilla/mux"
 	"github.com/redis/go-redis/v9"
+	"github.com/Devanshusharma2005/distributed-search/internal/embed"
+	"github.com/Devanshusharma2005/distributed-search/internal/hybrid"
 )
 
 var (
@@ -25,6 +27,8 @@ var (
 	limit     = flag.Int("limit", 20, "default global top-K limit")
 	redisAddr = flag.String("redis", "localhost:6379", "redis address")
 	cacheTTL  = 5 * time.Minute
+	embedClient     *embed.OllamaClient
+	hybridSearcher  *hybrid.HybridSearcher
 )
 
 var (
@@ -68,17 +72,56 @@ func main() {
 
 	log.Printf("🚀 Coordinator starting on port %d (Phase 4: Hot-term routing)...", *port)
 
+	// NEW: Initialize embedding client
+	embedClient = embed.NewOllamaClient("http://localhost:11434", "all-minilm")
+	log.Printf("🤖 Embedding client initialized (model=all-minilm)")
+
+	// NEW: Initialize hybrid searcher
+	hybridSearcher = hybrid.NewHybridSearcher(embedClient, *etcdEps)
+	log.Printf("🔬 Hybrid search engine ready")
+
+	log.Printf("🚀 Coordinator starting on port %d (Phase 5: Hybrid Search)...", *port)
+
 	r := mux.NewRouter()
 	r.HandleFunc("/search", coordSearchHandler).Methods("GET")
 	r.HandleFunc("/shards", listShardsHandler).Methods("GET")
 	r.HandleFunc("/hot-terms", listHotTermsHandler).Methods("GET")
-	r.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("OK"))
-	}).Methods("GET")
+	r.HandleFunc("/health", healthHandler).Methods("GET")
+	r.HandleFunc("/hybrid", hybridSearchHandler).Methods("GET")
 
-	log.Printf("🌐 Coordinator ready at :%d (cache=%v, hot-routing=enabled)", *port, rdb != nil)
+	log.Printf("🌐 Coordinator ready at :%d (cache=%v, hot-routing=enabled, hybrid=enabled)", 
+		*port, rdb != nil)
+	
 	log.Fatal(http.ListenAndServe(":"+strconv.Itoa(*port), r))
+}
+
+func hybridSearchHandler(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query().Get("q")
+	if q == "" {
+		http.Error(w, `{"error": "missing 'q' parameter"}`, http.StatusBadRequest)
+		return
+	}
+
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 {
+		limit = 10
+	}
+
+	alpha, _ := strconv.ParseFloat(r.URL.Query().Get("alpha"), 64)
+
+	// hybrid search
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	resp, err := hybridSearcher.Search(ctx, q, limit, alpha)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error": "%v"}`, err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Search-Type", "hybrid")
+	json.NewEncoder(w).Encode(resp)
 }
 
 func coordSearchHandler(w http.ResponseWriter, r *http.Request) {
@@ -411,4 +454,9 @@ func listHotTermsHandler(w http.ResponseWriter, r *http.Request) {
 		"hot_terms": hotTerms,
 		"count":     len(hotTerms),
 	})
+}
+
+func healthHandler(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("OK"))
 }

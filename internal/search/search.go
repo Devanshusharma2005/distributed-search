@@ -14,7 +14,7 @@ func FormatHit(hit *bleve.SearchHit, doc interface{}) map[string]interface{} {
 		"title":     hit.Fields["title"],
 		"fragments": map[string][]string{},
 	}
-
+	
 	for field, frags := range hit.Fragments {
 		result["fragments"].(map[string][]string)[field] = frags
 	}
