@@ -4,7 +4,7 @@ Production-grade distributed search engine combining **BM25 keyword matching** w
 
 ## Features
 
-**Vector Search (Phase 6)**
+**Vector Search (Phase 6)(Work In Progress...)** 
 - 384-dimensional embeddings via Ollama (all-minilm model)
 - 24,765 documents with stored vectors
 - Semantic similarity matching
