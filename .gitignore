@@ -1,43 +1,30 @@
 # --- Binaries & Executables ---
-/coord
-/coordinator
-/shard-server
-/searcher
-/indexer
-/indexer-bin
-__debug_bin
-/bin/
-/dist/
+coordinator
+coord
+shard-server
+indexer-bin
+indexer-vector
 *.exe
-*.out
 *.test
+__debug_bin
 
-# --- Data & Indexing (Bleve/Monolith/Shards) ---
-*.bleve/
-search.bleve*
-shard-*.jsonl
-docs.jsonl
-*.xml
-enwiki*
-*.gz
-*.bz2
-
-# --- Docker & Infrastructure Local Data ---
-# Very Important: Prevents committing your local database state
-.env
-docker/.env
-dump.rdb
-dump.aof
+# --- Index Data & Backups (Massive Binary Files) ---
+# We ignore the actual Bleve index data to keep Git light
 data/
-default.etcd/
-*.log
-
-# --- System & IDE ---
-.DS_Store
-.idea/
-.vscode/
-*.swp
-
-# --- Test & Benchmarking ---
+search.bleve-*/
+search-backup-*/
+shard-*.jsonl
 results.bin
-*.prof
+
+# --- Infrastructure & Database Persistence ---
+# Ignore etcd and Redis data snapshots
+default.etcd/
+dump.rdb
+
+# --- Raw Data Sources ---
+# Don't track massive XML or JSONL source files
+*.xml
+docs.jsonl
+
+# --- OS Specific ---
+.DS_Store
