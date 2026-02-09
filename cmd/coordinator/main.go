@@ -17,8 +17,6 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"github.com/gorilla/mux"
 	"github.com/redis/go-redis/v9"
-	
-	// Phase 5: Semantic Search
 	"github.com/Devanshusharma2005/distributed-search/internal/embed"
 	"github.com/Devanshusharma2005/distributed-search/internal/hybrid"
 )
@@ -34,8 +32,6 @@ var (
 var (
 	ctx context.Context
 	rdb *redis.Client
-	
-	// Phase 5: Hybrid Search
 	embedClient    *embed.OllamaClient
 	hybridSearcher *hybrid.HybridSearcher
 )
@@ -44,7 +40,6 @@ func init() {
 	ctx = context.Background()
 }
 
-// ShardHit represents a single result from a shard
 type ShardHit struct {
 	ID    string  `json:"id"`
 	Score float64 `json:"score"`
@@ -52,63 +47,54 @@ type ShardHit struct {
 	Shard string  `json:"shard,omitempty"`
 }
 
-// CoordinatorResponse is the merged response sent to the client
 type CoordinatorResponse struct {
 	Query       string     `json:"query"`
 	Shards      int        `json:"shards"`
 	TotalHits   int        `json:"total_hits"`
 	Hits        []ShardHit `json:"hits"`
 	Took        string     `json:"took"`
-	RoutingType string     `json:"routing_type"` // "hot" or "cold"
+	RoutingType string     `json:"routing_type"` 
 }
 
 func main() {
 	flag.Parse()
 
-	// Initialize Redis client
 	rdb = redis.NewClient(&redis.Options{
 		Addr: *redisAddr,
 	})
 
-	// Test Redis connection
 	if err := rdb.Ping(ctx).Err(); err != nil {
-		log.Printf("⚠️  Redis not available at %s: %v (cache disabled)", *redisAddr, err)
+		log.Printf("Redis not available at %s: %v (cache disabled)", *redisAddr, err)
 		rdb = nil
 	} else {
-		log.Printf("✅ Redis connected at %s", *redisAddr)
+		log.Printf("Redis connected at %s", *redisAddr)
 	}
 
-	// Phase 5: Initialize embedding client
 	embedClient = embed.NewOllamaClient("http://ollama:11434", "all-minilm")
 	log.Printf("🤖 Embedding client initialized (model=all-minilm, url=http://ollama:11434)")
 
-	// Phase 5: Initialize hybrid searcher
 	hybridSearcher = hybrid.NewHybridSearcher(embedClient, *etcdEps)
-	log.Printf("🔬 Hybrid search engine ready (alpha=0.7)")
+	log.Printf("Hybrid search engine ready (alpha=0.7)")
 
-	log.Printf("🚀 Coordinator starting on port %d (Phase 5: Hybrid Search)...", *port)
+	log.Printf("Coordinator starting on port %d (Phase 5: Hybrid Search)...", *port)
 
 	r := mux.NewRouter()
 	r.HandleFunc("/search", coordSearchHandler).Methods("GET")
 	r.HandleFunc("/shards", listShardsHandler).Methods("GET")
 	r.HandleFunc("/hot-terms", listHotTermsHandler).Methods("GET")
 	r.HandleFunc("/health", healthHandler).Methods("GET")
-	
-	// Phase 5: Hybrid search endpoint
 	r.HandleFunc("/hybrid", hybridSearchHandler).Methods("GET")
 
-	log.Printf("🌐 Coordinator ready at :%d (cache=%v, hot-routing=enabled, hybrid=enabled)", 
+	log.Printf("Coordinator ready at :%d (cache=%v, hot-routing=enabled, hybrid=enabled)", 
 		*port, rdb != nil)
 	log.Fatal(http.ListenAndServe(":"+strconv.Itoa(*port), r))
 }
 
-// healthHandler returns OK
 func healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("OK"))
 }
 
-// hybridSearchHandler performs hybrid search (BM25 + semantic)
 func hybridSearchHandler(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query().Get("q")
 	if q == "" {
@@ -123,7 +109,6 @@ func hybridSearchHandler(w http.ResponseWriter, r *http.Request) {
 
 	alpha, _ := strconv.ParseFloat(r.URL.Query().Get("alpha"), 64)
 
-	// Perform hybrid search
 	searchCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -137,8 +122,6 @@ func hybridSearchHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Search-Type", "hybrid")
 	json.NewEncoder(w).Encode(resp)
 }
-
-// coordSearchHandler handles /search?q=... requests with cache + hot-term routing
 func coordSearchHandler(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
@@ -153,14 +136,12 @@ func coordSearchHandler(w http.ResponseWriter, r *http.Request) {
 		qLimit = *limit
 	}
 
-	// CACHE KEY
 	cacheKey := fmt.Sprintf("search:%s:%d", q, qLimit)
 
-	// 1. CACHE LOOKUP
 	if rdb != nil {
 		cached, err := rdb.Get(ctx, cacheKey).Result()
 		if err == nil {
-			log.Printf("✅ CACHE HIT: %s", cacheKey)
+			log.Printf("CACHE HIT: %s", cacheKey)
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-Cache", "HIT")
 			w.Header().Set("X-Took", time.Since(start).String())
@@ -168,18 +149,16 @@ func coordSearchHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Cache miss - acquire lock to prevent thundering herd
 		lockKey := cacheKey + ":lock"
 		locked, _ := rdb.SetNX(ctx, lockKey, "1", 2*time.Second).Result()
 		if locked {
 			defer rdb.Del(ctx, lockKey)
-			log.Printf("🔄 CACHE MISS + LOCK: %s", cacheKey)
+			log.Printf("CACHE MISS + LOCK: %s", cacheKey)
 		} else {
-			// Wait for another request to populate
 			time.Sleep(50 * time.Millisecond)
 			cached, _ := rdb.Get(ctx, cacheKey).Result()
 			if cached != "" {
-				log.Printf("✅ CACHE populated by other request: %s", cacheKey)
+				log.Printf("CACHE populated by other request: %s", cacheKey)
 				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set("X-Cache", "HIT_WAIT")
 				w.Header().Set("X-Took", time.Since(start).String())
@@ -189,7 +168,6 @@ func coordSearchHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 2. Discover all active shards
 	allShards, err := discoverShards()
 	if err != nil || len(allShards) == 0 {
 		http.Error(w, fmt.Sprintf(`{"error": "no shards available: %v"}`, err), http.StatusServiceUnavailable)
@@ -209,20 +187,19 @@ func coordSearchHandler(w http.ResponseWriter, r *http.Request) {
 				hotShardAddrs = append(hotShardAddrs, allShards[shardID])
 			}
 		}
-		log.Printf("🔥 HOT TERM '%s' → %d affinity shards (not %d)", q, len(hotShardAddrs), len(allShards))
+		log.Printf("HOT TERM '%s' → %d affinity shards (not %d)", q, len(hotShardAddrs), len(allShards))
 		shardHits = fanoutQueryParallel(hotShardAddrs, q, perShardLimit)
 		routingType = "hot"
 		updateHotTermStats(q, len(shardHits), len(hotShardAddrs))
 	} else {
-		log.Printf("❄️  COLD TERM '%s' → ALL %d shards", q, len(allShards))
+		log.Printf("COLD TERM '%s' → ALL %d shards", q, len(allShards))
 		shardHits = fanoutQueryParallel(allShards, q, perShardLimit)
 		routingType = "cold"
 	}
 
-	// 4. Global top-K merge
+	// Global top-K merge
 	topHits := mergeTopK(shardHits, qLimit)
 
-	// 5. Build response
 	resp := CoordinatorResponse{
 		Query:       q,
 		Shards:      len(allShards),
@@ -233,8 +210,6 @@ func coordSearchHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resultJSON, _ := json.Marshal(resp)
-
-	// 6. CACHE POPULATE
 	if rdb != nil {
 		rdb.SetEx(ctx, cacheKey, resultJSON, cacheTTL)
 		log.Printf("✅ BACKEND + CACHED: %s (%v, routing=%s)", cacheKey, time.Since(start), routingType)
@@ -251,7 +226,6 @@ func coordSearchHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("✅ Coordinator: '%s' → %d hits (%s routing) in %v", q, len(topHits), routingType, time.Since(start))
 }
 
-// getHotTermShards checks etcd for hot term shard affinity
 func getHotTermShards(term string) ([]int, bool) {
 	cli, err := clientv3.New(clientv3.Config{
 		Endpoints:   strings.Split(*etcdEps, ","),
@@ -285,7 +259,6 @@ func getHotTermShards(term string) ([]int, bool) {
 	return shardIDs, true
 }
 
-// updateHotTermStats updates hot term statistics in etcd
 func updateHotTermStats(term string, hitCount, shardCount int) {
 	cli, err := clientv3.New(clientv3.Config{
 		Endpoints:   strings.Split(*etcdEps, ","),
@@ -304,7 +277,6 @@ func updateHotTermStats(term string, hitCount, shardCount int) {
 	cli.Put(ctx, key, value)
 }
 
-// discoverShards queries etcd for /shards/active/*
 func discoverShards() ([]string, error) {
 	cli, err := clientv3.New(clientv3.Config{
 		Endpoints:   strings.Split(*etcdEps, ","),
@@ -332,7 +304,6 @@ func discoverShards() ([]string, error) {
 	return shards, nil
 }
 
-// fanoutQueryParallel sends query to specified shards in parallel
 func fanoutQueryParallel(shards []string, q string, perShardLimit int) []ShardHit {
 	var wg sync.WaitGroup
 	hitsCh := make(chan ShardHit, len(shards)*perShardLimit)
@@ -361,7 +332,6 @@ func fanoutQueryParallel(shards []string, q string, perShardLimit int) []ShardHi
 	return allHits
 }
 
-// queryShard sends HTTP request to a single shard
 func queryShard(shardAddr, q string, limit int) []ShardHit {
 	queryURL := fmt.Sprintf("http://%s/search?q=%s&limit=%d",
 		shardAddr, url.QueryEscape(q), limit)
@@ -404,7 +374,6 @@ func queryShard(shardAddr, q string, limit int) []ShardHit {
 	return hits
 }
 
-// mergeTopK sorts all hits by score and returns top K
 func mergeTopK(allHits []ShardHit, k int) []ShardHit {
 	sort.Slice(allHits, func(i, j int) bool {
 		return allHits[i].Score > allHits[j].Score
@@ -416,7 +385,6 @@ func mergeTopK(allHits []ShardHit, k int) []ShardHit {
 	return allHits[:k]
 }
 
-// getString safely extracts string from interface{}
 func getString(v interface{}) string {
 	if s, ok := v.(string); ok {
 		return s
@@ -424,7 +392,6 @@ func getString(v interface{}) string {
 	return ""
 }
 
-// listShardsHandler shows currently active shards
 func listShardsHandler(w http.ResponseWriter, r *http.Request) {
 	shards, err := discoverShards()
 	if err != nil {
@@ -439,7 +406,6 @@ func listShardsHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// listHotTermsHandler shows configured hot terms
 func listHotTermsHandler(w http.ResponseWriter, r *http.Request) {
 	cli, err := clientv3.New(clientv3.Config{
 		Endpoints:   strings.Split(*etcdEps, ","),

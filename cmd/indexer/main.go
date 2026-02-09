@@ -30,30 +30,29 @@ func main() {
 	finalIndexPath := *indexPath
 	if *shardID >= 0 {
 		finalIndexPath = fmt.Sprintf("%s-%d", *indexPath, *shardID)
-		log.Printf("🔀 Shard mode: indexing shard-%d → %s", *shardID, finalIndexPath)
+		log.Printf("Shard mode: indexing shard-%d → %s", *shardID, finalIndexPath)
 	} else {
-		log.Printf("📦 Unsharded mode → %s", finalIndexPath)
+		log.Printf("Unsharded mode → %s", finalIndexPath)
 	}
 
-	log.Printf("🚀 Starting indexer | input=%s index=%s batch=%d max=%d vectors=%v",
+	log.Printf("Starting indexer | input=%s index=%s batch=%d max=%d vectors=%v",
 		*jsonlPath, finalIndexPath, *batchSize, *maxDocs, !*skipVectors)
 
 	// Phase 6: Initialize embedding client (unless skipped)
 	var embedClient *embed.OllamaClient
 	if !*skipVectors {
 		embedClient = embed.NewOllamaClient(*ollamaURL, "all-minilm")
-		log.Printf("🤖 Embedding client initialized (url=%s, model=all-minilm)", *ollamaURL)
+		log.Printf("Embedding client initialized (url=%s, model=all-minilm)", *ollamaURL)
 
-		// Test Ollama connectivity
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		testVec, err := embedClient.GetEmbedding(ctx, "test")
 		cancel()
 
 		if err != nil {
-			log.Printf("⚠️  Ollama not reachable: %v (falling back to keyword-only)", err)
+			log.Printf("Ollama not reachable: %v (falling back to keyword-only)", err)
 			embedClient = nil
 		} else {
-			log.Printf("✅ Ollama connected (test embedding: %d dims)", len(testVec))
+			log.Printf("Ollama connected (test embedding: %d dims)", len(testVec))
 		}
 	} else {
 		log.Printf("⏭️  Vector generation SKIPPED (keyword-only mode)")
