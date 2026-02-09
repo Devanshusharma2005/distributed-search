@@ -31,7 +31,7 @@ Production-grade distributed search engine combining **BM25 keyword matching** w
 
 ---
 ## Architecture
-![DSE Diagram](assets/dse3.excalidraw)
+![DSE Diagram](assets/dse.png)
 ## Quick Start
 
 ### Prerequisites
