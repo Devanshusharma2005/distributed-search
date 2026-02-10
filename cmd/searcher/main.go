@@ -187,11 +187,10 @@ func searchHandler(idx bleve.Index, shardID int) http.HandlerFunc {
 			limit = 20
 		}
 
-		// Here i am using bleve indexing library
 		query := bleve.NewQueryStringQuery(q)
 		req := bleve.NewSearchRequest(query)
 		req.Size = limit
-		req.Fields = []string{"title", "body"}
+		req.Fields = []string{"title", "body", "title_vector"}
 		req.Highlight = bleve.NewHighlight()
 
 		res, err := idx.Search(req)
