@@ -222,24 +222,24 @@ func main() {
 
 			var p page
 			if err := decoder.DecodeElement(&p, &se); err != nil {
-				log.Printf("⚠️  decode error (skipping): %v", err)
+				log.Printf("decode error (skipping): %v", err)
 				continue
 			}
 
 			pagesRead++
 			if pagesRead%10000 == 0 {
-				log.Printf("📄 Read %d pages from XML...", pagesRead)
+				log.Printf("Read %d pages from XML...", pagesRead)
 			}
 
 			if *maxDocs > 0 && pagesRead >= *maxDocs {
-				log.Printf("📄 Hit max-docs cap (%d), stopping reader.", *maxDocs)
+				log.Printf("Hit max-docs cap (%d), stopping reader.", *maxDocs)
 				break
 			}
 
 			pageCh <- p 
 		}
 
-		log.Printf("📄 Reader finished. Total pages pulled from XML: %d", pagesRead)
+		log.Printf("Reader finished. Total pages pulled from XML: %d", pagesRead)
 	}()
 
 	batch := make([]model.Doc, 0, batchSize)

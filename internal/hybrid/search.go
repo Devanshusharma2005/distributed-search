@@ -17,12 +17,10 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
-// EmbeddingClient interface for dependency injection
 type EmbeddingClient interface {
 	GetEmbedding(ctx context.Context, text string) ([]float64, error)
 }
 
-// ShardHit represents a result from a single shard (from coordinator)
 type ShardHit struct {
 	ID    string  `json:"id"`
 	Score float64 `json:"score"`
@@ -30,7 +28,6 @@ type ShardHit struct {
 	Shard string  `json:"shard,omitempty"`
 }
 
-// HybridResult combines keyword and semantic scores
 type HybridResult struct {
 	ID             string  `json:"id"`
 	Title          string  `json:"title"`
@@ -40,7 +37,6 @@ type HybridResult struct {
 	Shard          string  `json:"shard"`
 }
 
-// HybridResponse is the final response
 type HybridResponse struct {
 	Query          string         `json:"query"`
 	QueryVector    []float64      `json:"query_vector,omitempty"`
@@ -52,14 +48,12 @@ type HybridResponse struct {
 	RoutingType    string         `json:"routing_type"`
 }
 
-// HybridSearcher handles hybrid search operations
 type HybridSearcher struct {
 	embedClient  EmbeddingClient
 	etcdEps      string
 	defaultAlpha float64
 }
 
-// NewHybridSearcher creates a new hybrid search handler
 func NewHybridSearcher(embedClient EmbeddingClient, etcdEps string) *HybridSearcher {
 	return &HybridSearcher{
 		embedClient:  embedClient,
@@ -68,7 +62,6 @@ func NewHybridSearcher(embedClient EmbeddingClient, etcdEps string) *HybridSearc
 	}
 }
 
-// Search performs hybrid search combining keyword and semantic ranking
 func (h *HybridSearcher) Search(ctx context.Context, query string, limit int, alpha float64) (*HybridResponse, error) {
 	start := time.Now()
 
@@ -76,23 +69,20 @@ func (h *HybridSearcher) Search(ctx context.Context, query string, limit int, al
 		alpha = h.defaultAlpha
 	}
 
-	// STEP 1: Generate query embedding (semantic representation)
 	embedCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	queryVector, err := h.embedClient.GetEmbedding(embedCtx, query)
 	if err != nil {
 		log.Printf("⚠️  Embedding failed for '%s': %v (falling back to keyword-only)", query, err)
-		queryVector = nil // Fall back to keyword-only search
+		queryVector = nil 
 	}
 
-	// STEP 2: Discover shards
 	allShards, err := h.discoverShards()
 	if err != nil {
 		return nil, fmt.Errorf("discover shards: %w", err)
 	}
 
-	// STEP 3: Check for hot-term routing
 	hotShardIDs, isHot := h.getHotTermShards(query)
 	
 	var shardHits []ShardHit
@@ -115,10 +105,8 @@ func (h *HybridSearcher) Search(ctx context.Context, query string, limit int, al
 		routingType = "cold"
 	}
 
-	// STEP 4: Fan-out to shards (get top-100 candidates)
 	shardHits = h.fanoutQueryParallel(targetShards, query, 100)
 
-	// STEP 5: Hybrid scoring (combine BM25 + cosine similarity)
 	hybridResults := make([]HybridResult, len(shardHits))
 	
 	for i, hit := range shardHits {
@@ -129,22 +117,16 @@ func (h *HybridSearcher) Search(ctx context.Context, query string, limit int, al
 			Shard:        hit.Shard,
 		}
 
-		// If we have embeddings, compute semantic score
 		if queryVector != nil {
-			// TODO: In production, fetch document vectors from shards
-			// For now, we'll use keyword score only until we rebuild indexes
-			semanticScore := 0.0 // Placeholder
+			semanticScore := 0.0 
 			
-			// Hybrid fusion: alpha * keyword + (1-alpha) * semantic
 			hybridResults[i].SemanticScore = semanticScore
 			hybridResults[i].HybridScore = alpha*hit.Score + (1-alpha)*semanticScore
 		} else {
-			// No semantic scoring - use keyword score only
 			hybridResults[i].HybridScore = hit.Score
 		}
 	}
 
-	// STEP 6: Sort by hybrid score and take top-K
 	sort.Slice(hybridResults, func(i, j int) bool {
 		return hybridResults[i].HybridScore > hybridResults[j].HybridScore
 	})
@@ -153,7 +135,6 @@ func (h *HybridSearcher) Search(ctx context.Context, query string, limit int, al
 		hybridResults = hybridResults[:limit]
 	}
 
-	// STEP 7: Build response
 	resp := &HybridResponse{
 		Query:        query,
 		QueryVector:  queryVector,
@@ -171,7 +152,6 @@ func (h *HybridSearcher) Search(ctx context.Context, query string, limit int, al
 	return resp, nil
 }
 
-// discoverShards queries etcd for /shards/active/*
 func (h *HybridSearcher) discoverShards() ([]string, error) {
 	cli, err := clientv3.New(clientv3.Config{
 		Endpoints:   strings.Split(h.etcdEps, ","),
@@ -199,7 +179,6 @@ func (h *HybridSearcher) discoverShards() ([]string, error) {
 	return shards, nil
 }
 
-// getHotTermShards checks etcd for hot term shard affinity
 func (h *HybridSearcher) getHotTermShards(term string) ([]int, bool) {
 	cli, err := clientv3.New(clientv3.Config{
 		Endpoints:   strings.Split(h.etcdEps, ","),
@@ -234,7 +213,6 @@ func (h *HybridSearcher) getHotTermShards(term string) ([]int, bool) {
 	return shardIDs, true
 }
 
-// fanoutQueryParallel sends query to specified shards in parallel
 func (h *HybridSearcher) fanoutQueryParallel(shards []string, q string, perShardLimit int) []ShardHit {
 	var wg sync.WaitGroup
 	hitsCh := make(chan ShardHit, len(shards)*perShardLimit)
@@ -263,14 +241,13 @@ func (h *HybridSearcher) fanoutQueryParallel(shards []string, q string, perShard
 	return allHits
 }
 
-// queryShard sends HTTP request to a single shard
 func (h *HybridSearcher) queryShard(shardAddr, q string, limit int) []ShardHit {
 	queryURL := fmt.Sprintf("http://%s/search?q=%s&limit=%d",
 		shardAddr, url.QueryEscape(q), limit)
 
 	resp, err := http.Get(queryURL)
 	if err != nil {
-		log.Printf("⚠️  Shard %s error: %v", shardAddr, err)
+		log.Printf("Shard %s error: %v", shardAddr, err)
 		return nil
 	}
 	defer resp.Body.Close()
@@ -289,7 +266,7 @@ func (h *HybridSearcher) queryShard(shardAddr, q string, limit int) []ShardHit {
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&bleveRes); err != nil {
-		log.Printf("⚠️  Shard %s decode error: %v", shardAddr, err)
+		log.Printf("Shard %s decode error: %v", shardAddr, err)
 		return nil
 	}
 
@@ -306,7 +283,6 @@ func (h *HybridSearcher) queryShard(shardAddr, q string, limit int) []ShardHit {
 	return hits
 }
 
-// getString safely extracts string from interface{}
 func getString(v interface{}) string {
 	if s, ok := v.(string); ok {
 		return s
@@ -314,7 +290,6 @@ func getString(v interface{}) string {
 	return ""
 }
 
-// CosineSimilarity computes the cosine similarity between two vectors
 func CosineSimilarity(a, b []float64) float64 {
 	if len(a) != len(b) {
 		return 0

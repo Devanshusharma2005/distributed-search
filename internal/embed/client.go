@@ -16,7 +16,6 @@ type OllamaClient struct {
 	model   string
 }
 
-// EmbeddingRequest is the Ollama API request format
 type EmbeddingRequest struct {
 	Model  string `json:"model"`
 	Prompt string `json:"prompt"`

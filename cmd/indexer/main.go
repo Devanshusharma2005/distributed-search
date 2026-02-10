@@ -26,7 +26,6 @@ func main() {
 	)
 	flag.Parse()
 
-	// Build final index path
 	finalIndexPath := *indexPath
 	if *shardID >= 0 {
 		finalIndexPath = fmt.Sprintf("%s-%d", *indexPath, *shardID)
@@ -38,7 +37,6 @@ func main() {
 	log.Printf("Starting indexer | input=%s index=%s batch=%d max=%d vectors=%v",
 		*jsonlPath, finalIndexPath, *batchSize, *maxDocs, !*skipVectors)
 
-	// Phase 6: Initialize embedding client (unless skipped)
 	var embedClient *embed.OllamaClient
 	if !*skipVectors {
 		embedClient = embed.NewOllamaClient(*ollamaURL, "all-minilm")
@@ -55,10 +53,9 @@ func main() {
 			log.Printf("Ollama connected (test embedding: %d dims)", len(testVec))
 		}
 	} else {
-		log.Printf("⏭️  Vector generation SKIPPED (keyword-only mode)")
+		log.Printf("Vector generation SKIPPED (keyword-only mode)")
 	}
 
-	// Create indexer (with or without vector support)
 	var indexer *index.Indexer
 	var err error
 	
@@ -69,7 +66,7 @@ func main() {
 	}
 	
 	if err != nil {
-		log.Fatalf("❌ Init indexer: %v", err)
+		log.Fatalf("Init indexer: %v", err)
 	}
 	defer indexer.Close()
 
@@ -81,15 +78,15 @@ func main() {
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigs
-		log.Println("🛑 Shutdown requested...")
+		log.Println("Shutdown requested...")
 		cancel()
 	}()
 
 	// Index documents
 	start := time.Now()
 	if err := indexer.IndexJSONL(ctx, *jsonlPath, *batchSize, *maxDocs); err != nil {
-		log.Fatalf("❌ Indexing failed: %v", err)
+		log.Fatalf("Indexing failed: %v", err)
 	}
 	
-	log.Printf("🎉 Indexer complete in %v!", time.Since(start))
+	log.Printf("Indexer complete in %v!", time.Since(start))
 }

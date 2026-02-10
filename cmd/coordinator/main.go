@@ -338,13 +338,13 @@ func queryShard(shardAddr, q string, limit int) []ShardHit {
 
 	resp, err := http.Get(queryURL)
 	if err != nil {
-		log.Printf("⚠️  Shard %s error: %v", shardAddr, err)
+		log.Printf("Shard %s error: %v", shardAddr, err)
 		return nil
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		log.Printf("⚠️  Shard %s returned status %d", shardAddr, resp.StatusCode)
+		log.Printf("Shard %s returned status %d", shardAddr, resp.StatusCode)
 		return nil
 	}
 
@@ -357,7 +357,7 @@ func queryShard(shardAddr, q string, limit int) []ShardHit {
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&bleveRes); err != nil {
-		log.Printf("⚠️  Shard %s decode error: %v", shardAddr, err)
+		log.Printf("Shard %s decode error: %v", shardAddr, err)
 		return nil
 	}
 

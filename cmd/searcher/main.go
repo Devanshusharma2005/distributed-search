@@ -52,13 +52,11 @@ var (
 func main() {
 	flag.Parse()
 
-	// Compute shard-specific index path
 	indexPath := *indexBase
 	if *shardID >= 0 {
 		indexPath = fmt.Sprintf("%s-%d", *indexBase, *shardID)
 	}
 
-	// Load the shard's index 
 	idx, err := index.NewIndexer(indexPath)
 	if err != nil {
 		log.Fatalf("❌ load index %s: %v", indexPath, err)
@@ -128,7 +126,6 @@ func registerShard(ctx context.Context, shardID, port int, hostname, etcdEps str
 	}
 	defer cli.Close()
 
-	// Create a 30-second TTL lease
 	lease, err := cli.Grant(ctx, 30)
 	if err != nil {
 		log.Fatalf("❌ etcd lease: %v", err)
@@ -137,13 +134,11 @@ func registerShard(ctx context.Context, shardID, port int, hostname, etcdEps str
 	shardAddr := fmt.Sprintf("%s:%d", hostname, port)
 	key := fmt.Sprintf("/shards/active/%d", shardID)
 
-	// Register shard with the lease
 	_, err = cli.Put(ctx, key, shardAddr, clientv3.WithLease(lease.ID))
 	if err != nil {
 		log.Fatalf("❌ etcd put %s: %v", key, err)
 	}
 
-	// Keep lease alive (auto-renew every 10s)
 	ch, kaErr := cli.KeepAlive(ctx, lease.ID)
 	if kaErr != nil {
 		log.Fatalf("❌ etcd keepalive: %v", kaErr)
@@ -170,7 +165,6 @@ func registerShard(ctx context.Context, shardID, port int, hostname, etcdEps str
 	}
 }
 
-// This is the main concrete function -> searchHandler handles /search?q=... requests for this shard
 func searchHandler(idx bleve.Index, shardID int) http.HandlerFunc {
 	shardLabel := "single"
 	if shardID >= 0 {

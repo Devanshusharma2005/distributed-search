@@ -17,37 +17,30 @@ import (
 type Indexer struct {
 	Index       bleve.Index
 	path        string
-	embedClient *embed.OllamaClient // Phase 6: Embedding client
+	embedClient *embed.OllamaClient 
 }
 
-// NewIndexer creates a new indexer (Phase 1-5 compatible)
 func NewIndexer(indexPath string) (*Indexer, error) {
 	return NewIndexerWithVectors(indexPath, nil)
 }
 
-// NewIndexerWithVectors creates indexer with optional embedding support (Phase 6)
 func NewIndexerWithVectors(indexPath string, embedClient *embed.OllamaClient) (*Indexer, error) {
-	// Try to open existing index first
 	index, err := bleve.Open(indexPath)
 	if err == nil {
 		log.Printf("📂 Opened existing index at %s", indexPath)
 		return &Indexer{Index: index, path: indexPath, embedClient: embedClient}, nil
 	}
 
-	// Create new index with vector support
 	mapping := bleve.NewIndexMapping()
 	
-	// If embeddings enabled, add vector field
 	if embedClient != nil {
 		docMapping := bleve.NewDocumentMapping()
 		
-		// Standard text fields
 		textFieldMapping := bleve.NewTextFieldMapping()
 		docMapping.AddFieldMappingsAt("id", textFieldMapping)
 		docMapping.AddFieldMappingsAt("title", textFieldMapping)
 		docMapping.AddFieldMappingsAt("body", textFieldMapping)
 		
-		// Vector field (384 dimensions stored as indexed numeric array)
 		vectorFieldMapping := bleve.NewNumericFieldMapping()
 		vectorFieldMapping.Store = true
 		vectorFieldMapping.Index = false
@@ -163,12 +156,12 @@ flush:
 	elapsed := time.Since(start)
 	docsPerSec := float64(indexed) / elapsed.Seconds()
 
-	log.Printf("✅ Indexing complete:")
-	log.Printf("   📊 %d docs indexed, %d skipped", indexed, skipped)
+	log.Printf("Indexing complete:")
+	log.Printf("%d docs indexed, %d skipped", indexed, skipped)
 	if idx.embedClient != nil {
-		log.Printf("   🤖 %d embeddings generated, %d failed", embedsSuccess, embedsFailed)
+		log.Printf(" %d embeddings generated, %d failed", embedsSuccess, embedsFailed)
 	}
-	log.Printf("   ⏱️  %v elapsed (%.0f docs/sec)", elapsed, docsPerSec)
+	log.Printf("%v elapsed (%.0f docs/sec)", elapsed, docsPerSec)
 
 	return nil
 }
