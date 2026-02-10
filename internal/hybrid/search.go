@@ -22,30 +22,31 @@ type EmbeddingClient interface {
 }
 
 type ShardHit struct {
-	ID    string  `json:"id"`
-	Score float64 `json:"score"`
-	Title string  `json:"title"`
-	Shard string  `json:"shard,omitempty"`
+	ID          string    `json:"id"`
+	Score       float64   `json:"score"`
+	Title       string    `json:"title"`
+	TitleVector []float64 `json:"title_vector,omitempty"`
+	Shard       string    `json:"shard,omitempty"`
 }
 
 type HybridResult struct {
-	ID             string  `json:"id"`
-	Title          string  `json:"title"`
-	KeywordScore   float64 `json:"keyword_score"`
-	SemanticScore  float64 `json:"semantic_score,omitempty"`
-	HybridScore    float64 `json:"hybrid_score"`
-	Shard          string  `json:"shard"`
+	ID            string  `json:"id"`
+	Title         string  `json:"title"`
+	KeywordScore  float64 `json:"keyword_score"`
+	SemanticScore float64 `json:"semantic_score,omitempty"`
+	HybridScore   float64 `json:"hybrid_score"`
+	Shard         string  `json:"shard"`
 }
 
 type HybridResponse struct {
-	Query          string         `json:"query"`
-	QueryVector    []float64      `json:"query_vector,omitempty"`
-	KeywordHits    int            `json:"keyword_hits"`
-	SemanticTopK   int            `json:"semantic_topk"`
-	FusionAlpha    float64        `json:"fusion_alpha"`
-	Hits           []HybridResult `json:"hits"`
-	Took           string         `json:"took"`
-	RoutingType    string         `json:"routing_type"`
+	Query        string         `json:"query"`
+	QueryVector  []float64      `json:"query_vector,omitempty"`
+	KeywordHits  int            `json:"keyword_hits"`
+	SemanticTopK int            `json:"semantic_topk"`
+	FusionAlpha  float64        `json:"fusion_alpha"`
+	Hits         []HybridResult `json:"hits"`
+	Took         string         `json:"took"`
+	RoutingType  string         `json:"routing_type"`
 }
 
 type HybridSearcher struct {
@@ -58,7 +59,7 @@ func NewHybridSearcher(embedClient EmbeddingClient, etcdEps string) *HybridSearc
 	return &HybridSearcher{
 		embedClient:  embedClient,
 		etcdEps:      etcdEps,
-		defaultAlpha: 0.7, // 70% keyword, 30% semantic
+		defaultAlpha: 0.7, 
 	}
 }
 
@@ -75,7 +76,7 @@ func (h *HybridSearcher) Search(ctx context.Context, query string, limit int, al
 	queryVector, err := h.embedClient.GetEmbedding(embedCtx, query)
 	if err != nil {
 		log.Printf("⚠️  Embedding failed for '%s': %v (falling back to keyword-only)", query, err)
-		queryVector = nil 
+		queryVector = nil
 	}
 
 	allShards, err := h.discoverShards()
@@ -84,7 +85,7 @@ func (h *HybridSearcher) Search(ctx context.Context, query string, limit int, al
 	}
 
 	hotShardIDs, isHot := h.getHotTermShards(query)
-	
+
 	var shardHits []ShardHit
 	var routingType string
 	var targetShards []string
@@ -96,11 +97,11 @@ func (h *HybridSearcher) Search(ctx context.Context, query string, limit int, al
 				hotShardAddrs = append(hotShardAddrs, allShards[shardID])
 			}
 		}
-		log.Printf("🔥 HYBRID: HOT TERM '%s' → %d shards", query, len(hotShardAddrs))
+		log.Printf("HYBRID: HOT TERM '%s' → %d shards", query, len(hotShardAddrs))
 		targetShards = hotShardAddrs
 		routingType = "hot"
 	} else {
-		log.Printf("❄️  HYBRID: COLD TERM '%s' → ALL %d shards", query, len(allShards))
+		log.Printf("HYBRID: COLD TERM '%s' → ALL %d shards", query, len(allShards))
 		targetShards = allShards
 		routingType = "cold"
 	}
@@ -108,7 +109,9 @@ func (h *HybridSearcher) Search(ctx context.Context, query string, limit int, al
 	shardHits = h.fanoutQueryParallel(targetShards, query, 100)
 
 	hybridResults := make([]HybridResult, len(shardHits))
-	
+
+	semanticCount := 0 
+
 	for i, hit := range shardHits {
 		hybridResults[i] = HybridResult{
 			ID:           hit.ID,
@@ -117,16 +120,18 @@ func (h *HybridSearcher) Search(ctx context.Context, query string, limit int, al
 			Shard:        hit.Shard,
 		}
 
-		if queryVector != nil {
-			semanticScore := 0.0 
-			
+		if queryVector != nil && hit.TitleVector != nil && len(hit.TitleVector) > 0 {
+			semanticScore := CosineSimilarity(queryVector, hit.TitleVector)
 			hybridResults[i].SemanticScore = semanticScore
 			hybridResults[i].HybridScore = alpha*hit.Score + (1-alpha)*semanticScore
+			semanticCount++
 		} else {
+			hybridResults[i].SemanticScore = 0.0
 			hybridResults[i].HybridScore = hit.Score
 		}
 	}
 
+	// Sorted by hybrid score (have to improve it from kway merge)
 	sort.Slice(hybridResults, func(i, j int) bool {
 		return hybridResults[i].HybridScore > hybridResults[j].HybridScore
 	})
@@ -146,8 +151,8 @@ func (h *HybridSearcher) Search(ctx context.Context, query string, limit int, al
 		RoutingType:  routingType,
 	}
 
-	log.Printf("✅ HYBRID: '%s' → %d candidates, %d final (alpha=%.2f) in %v", 
-		query, len(shardHits), len(hybridResults), alpha, time.Since(start))
+	log.Printf("HYBRID: '%s' → %d candidates, %d with vectors, %d final (alpha=%.2f) in %v",
+		query, len(shardHits), semanticCount, len(hybridResults), alpha, time.Since(start))
 
 	return resp, nil
 }
@@ -198,7 +203,6 @@ func (h *HybridSearcher) getHotTermShards(term string) ([]int, bool) {
 		return nil, false
 	}
 
-	// Parse comma-separated shard IDs: "0,1,2"
 	shardStr := string(resp.Kvs[0].Value)
 	idStrs := strings.Split(shardStr, ",")
 	shardIDs := make([]int, 0, len(idStrs))
@@ -253,7 +257,7 @@ func (h *HybridSearcher) queryShard(shardAddr, q string, limit int) []ShardHit {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		log.Printf("⚠️  Shard %s returned status %d", shardAddr, resp.StatusCode)
+		log.Printf("Shard %s returned status %d", shardAddr, resp.StatusCode)
 		return nil
 	}
 
@@ -278,9 +282,30 @@ func (h *HybridSearcher) queryShard(shardAddr, q string, limit int) []ShardHit {
 			Title: getString(h.Fields["title"]),
 			Shard: shardAddr,
 		}
+		if vecField, ok := h.Fields["title_vector"]; ok {
+			hits[i].TitleVector = parseVector(vecField)
+		}
 	}
 
 	return hits
+}
+
+func parseVector(field interface{}) []float64 {
+	switch v := field.(type) {
+	case []interface{}:
+		vec := make([]float64, len(v))
+		for i, val := range v {
+			if f, ok := val.(float64); ok {
+				vec[i] = f
+			}
+		}
+		return vec
+	case []float64:
+		// Already correct type
+		return v
+	default:
+		return nil
+	}
 }
 
 func getString(v interface{}) string {
@@ -291,7 +316,7 @@ func getString(v interface{}) string {
 }
 
 func CosineSimilarity(a, b []float64) float64 {
-	if len(a) != len(b) {
+	if len(a) != len(b) || len(a) == 0 {
 		return 0
 	}
 

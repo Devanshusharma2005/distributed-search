@@ -212,7 +212,7 @@ func coordSearchHandler(w http.ResponseWriter, r *http.Request) {
 	resultJSON, _ := json.Marshal(resp)
 	if rdb != nil {
 		rdb.SetEx(ctx, cacheKey, resultJSON, cacheTTL)
-		log.Printf("✅ BACKEND + CACHED: %s (%v, routing=%s)", cacheKey, time.Since(start), routingType)
+		log.Printf("BACKEND + CACHED: %s (%v, routing=%s)", cacheKey, time.Since(start), routingType)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -223,7 +223,7 @@ func coordSearchHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Routing", routingType)
 	w.Write(resultJSON)
 
-	log.Printf("✅ Coordinator: '%s' → %d hits (%s routing) in %v", q, len(topHits), routingType, time.Since(start))
+	log.Printf("Coordinator: '%s' → %d hits (%s routing) in %v", q, len(topHits), routingType, time.Since(start))
 }
 
 func getHotTermShards(term string) ([]int, bool) {

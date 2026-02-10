@@ -27,7 +27,7 @@ func NewIndexer(indexPath string) (*Indexer, error) {
 func NewIndexerWithVectors(indexPath string, embedClient *embed.OllamaClient) (*Indexer, error) {
 	index, err := bleve.Open(indexPath)
 	if err == nil {
-		log.Printf("📂 Opened existing index at %s", indexPath)
+		log.Printf("Opened existing index at %s", indexPath)
 		return &Indexer{Index: index, path: indexPath, embedClient: embedClient}, nil
 	}
 
@@ -47,7 +47,7 @@ func NewIndexerWithVectors(indexPath string, embedClient *embed.OllamaClient) (*
 		docMapping.AddFieldMappingsAt("title_vector", vectorFieldMapping)
 		
 		mapping.AddDocumentMapping("_default", docMapping)
-		log.Printf("✨ Creating index WITH vector field support")
+		log.Printf("Creating index WITH vector field support")
 	}
 
 	index, err = bleve.New(indexPath, mapping)
@@ -55,7 +55,7 @@ func NewIndexerWithVectors(indexPath string, embedClient *embed.OllamaClient) (*
 		return nil, fmt.Errorf("create bleve index: %w", err)
 	}
 
-	log.Printf("📁 Created new index at %s", indexPath)
+	log.Printf("Created new index at %s", indexPath)
 	return &Indexer{Index: index, path: indexPath, embedClient: embedClient}, nil
 }
 
@@ -77,7 +77,7 @@ func (idx *Indexer) IndexJSONL(ctx context.Context, jsonlPath string, batchSize 
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("⚠️ Context cancelled, flushing remaining batch...")
+			log.Println("Context cancelled, flushing remaining batch...")
 			goto flush
 		default:
 		}
@@ -105,7 +105,7 @@ func (idx *Indexer) IndexJSONL(ctx context.Context, jsonlPath string, batchSize 
 			if err != nil {
 				embedsFailed++
 				if embedsFailed <= 3 {
-					log.Printf("⚠️  Embedding failed for doc %s: %v", doc.ID, err)
+					log.Printf("Embedding failed for doc %s: %v", doc.ID, err)
 				}
 			} else {
 				doc.TitleVector = embedding
@@ -130,10 +130,10 @@ func (idx *Indexer) IndexJSONL(ctx context.Context, jsonlPath string, batchSize 
 				elapsed := time.Since(start)
 				rate := float64(indexed) / elapsed.Seconds()
 				if idx.embedClient != nil {
-					log.Printf("⏳ Progress: %d docs indexed (%.0f/sec, %d embeds OK, %d failed)",
+					log.Printf("Progress: %d docs indexed (%.0f/sec, %d embeds OK, %d failed)",
 						indexed, rate, embedsSuccess, embedsFailed)
 				} else {
-					log.Printf("⏳ Progress: %d docs indexed (%.0f/sec)",
+					log.Printf("Progress: %d docs indexed (%.0f/sec)",
 						indexed, rate)
 				}
 				lastLog = time.Now()
@@ -141,7 +141,7 @@ func (idx *Indexer) IndexJSONL(ctx context.Context, jsonlPath string, batchSize 
 		}
 
 		if maxDocs > 0 && indexed >= maxDocs {
-			log.Printf("🎯 Reached max-docs limit (%d)", maxDocs)
+			log.Printf("Reached max-docs limit (%d)", maxDocs)
 			break
 		}
 	}
@@ -166,7 +166,6 @@ flush:
 	return nil
 }
 
-// Close closes the index
 func (idx *Indexer) Close() error {
 	return idx.Index.Close()
 }

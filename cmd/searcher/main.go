@@ -59,12 +59,12 @@ func main() {
 
 	idx, err := index.NewIndexer(indexPath)
 	if err != nil {
-		log.Fatalf("❌ load index %s: %v", indexPath, err)
+		log.Fatalf("load index %s: %v", indexPath, err)
 	}
 	defer idx.Close()
 
 	docCount, _ := idx.Index.DocCount()
-	log.Printf("🚀 Shard service ready :%d (index=%s, docs=%d)", *port, indexPath, docCount)
+	log.Printf("Shard service ready :%d (index=%s, docs=%d)", *port, indexPath, docCount)
 
 	// etcd registration (only in shard mode)
 	var cancelReg context.CancelFunc
@@ -72,7 +72,7 @@ func main() {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancelReg = cancel
 		go registerShard(ctx, *shardID, *port, *hostname, *etcdEps)
-		log.Printf("🔗 Starting etcd registration for shard-%d...", *shardID)
+		log.Printf("Starting etcd registration for shard-%d...", *shardID)
 	}
 
 	// HTTP server setup
@@ -94,14 +94,14 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
-		log.Printf("🌐 HTTP listening on :%d", *port)
+		log.Printf("HTTP listening on :%d", *port)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("❌ HTTP server: %v", err)
+			log.Fatalf("HTTP server: %v", err)
 		}
 	}()
 
 	<-quit
-	log.Println("🛑 Shutdown signal received...")
+	log.Println("Shutdown signal received...")
 	if cancelReg != nil {
 		cancelReg()
 	}
@@ -110,7 +110,7 @@ func main() {
 	defer shutdownCancel()
 	srv.Shutdown(shutdownCtx)
 
-	log.Println("👋 Shard service stopped")
+	log.Println("Shard service stopped")
 }
 
 // registerShard registers this shard in etcd with a keepalive lease
@@ -122,13 +122,13 @@ func registerShard(ctx context.Context, shardID, port int, hostname, etcdEps str
 		DialTimeout: 5 * time.Second,
 	})
 	if err != nil {
-		log.Fatalf("❌ etcd connect: %v", err)
+		log.Fatalf("etcd connect: %v", err)
 	}
 	defer cli.Close()
 
 	lease, err := cli.Grant(ctx, 30)
 	if err != nil {
-		log.Fatalf("❌ etcd lease: %v", err)
+		log.Fatalf("etcd lease: %v", err)
 	}
 
 	shardAddr := fmt.Sprintf("%s:%d", hostname, port)
@@ -136,29 +136,29 @@ func registerShard(ctx context.Context, shardID, port int, hostname, etcdEps str
 
 	_, err = cli.Put(ctx, key, shardAddr, clientv3.WithLease(lease.ID))
 	if err != nil {
-		log.Fatalf("❌ etcd put %s: %v", key, err)
+		log.Fatalf("etcd put %s: %v", key, err)
 	}
 
 	ch, kaErr := cli.KeepAlive(ctx, lease.ID)
 	if kaErr != nil {
-		log.Fatalf("❌ etcd keepalive: %v", kaErr)
+		log.Fatalf("etcd keepalive: %v", kaErr)
 	}
 
-	log.Printf("✅ Shard-%d registered: %s → %s (lease=%d)", shardID, key, shardAddr, lease.ID)
+	log.Printf("Shard-%d registered: %s → %s (lease=%d)", shardID, key, shardAddr, lease.ID)
 
 	// Heartbeat loop - keeps the lease alive until context is cancelled
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("🔌 Shard-%d deregistering from etcd...", shardID)
+			log.Printf("Shard-%d deregistering from etcd...", shardID)
 			return
 		case ka, ok := <-ch:
 			if !ok {
-				log.Printf("⚠️  Keepalive channel closed for shard-%d", shardID)
+				log.Printf("Keepalive channel closed for shard-%d", shardID)
 				return
 			}
 			if ka == nil {
-				log.Printf("⚠️  Keepalive failed for shard-%d, lease expired", shardID)
+				log.Printf("Keepalive failed for shard-%d, lease expired", shardID)
 				return
 			}
 		}
@@ -208,6 +208,6 @@ func searchHandler(idx bleve.Index, shardID int) http.HandlerFunc {
 		queriesTotal.WithLabelValues("success", shardLabel).Inc()
 		queryLatency.WithLabelValues("success", shardLabel).Observe(time.Since(start).Seconds())
 
-		log.Printf("✅ '%s' → %d hits in %v (shard=%s)", q, len(res.Hits), time.Since(start), shardLabel)
+		log.Printf("'%s' → %d hits in %v (shard=%s)", q, len(res.Hits), time.Since(start), shardLabel)
 	}
 }
