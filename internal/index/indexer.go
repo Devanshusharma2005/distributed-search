@@ -125,7 +125,6 @@ func (idx *Indexer) IndexJSONL(ctx context.Context, jsonlPath string, batchSize 
 			}
 			batch = idx.Index.NewBatch()
 			
-			// Progress logging
 			if time.Since(lastLog) > 2*time.Second {
 				elapsed := time.Since(start)
 				rate := float64(indexed) / elapsed.Seconds()

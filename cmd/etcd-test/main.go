@@ -18,7 +18,7 @@ func main() {
 		DialTimeout: 5 * time.Second,
 	})
 	if err != nil {
-		log.Fatalf("❌ Failed to connect to etcd: %v", err)
+		log.Fatalf("Failed to connect to etcd: %v", err)
 	}
 	defer cli.Close()
 
@@ -28,7 +28,7 @@ func main() {
 	log.Println("Writing test shard mapping...")
 	_, err = cli.Put(ctx, "/shards/active/0", "localhost:8081")
 	if err != nil {
-		log.Fatalf("❌ PUT failed: %v", err)
+		log.Fatalf("PUT failed: %v", err)
 	}
 
 	log.Println("Reading shard mapping...")

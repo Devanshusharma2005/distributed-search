@@ -32,6 +32,7 @@ var (
 var (
 	ctx context.Context
 	rdb *redis.Client
+	
 	embedClient    *embed.OllamaClient
 	hybridSearcher *hybrid.HybridSearcher
 )
@@ -71,7 +72,7 @@ func main() {
 	}
 
 	embedClient = embed.NewOllamaClient("http://ollama:11434", "all-minilm")
-	log.Printf("🤖 Embedding client initialized (model=all-minilm, url=http://ollama:11434)")
+	log.Printf("Embedding client initialized (model=all-minilm, url=http://ollama:11434)")
 
 	hybridSearcher = hybrid.NewHybridSearcher(embedClient, *etcdEps)
 	log.Printf("Hybrid search engine ready (alpha=0.7)")
@@ -83,6 +84,7 @@ func main() {
 	r.HandleFunc("/shards", listShardsHandler).Methods("GET")
 	r.HandleFunc("/hot-terms", listHotTermsHandler).Methods("GET")
 	r.HandleFunc("/health", healthHandler).Methods("GET")
+	
 	r.HandleFunc("/hybrid", hybridSearchHandler).Methods("GET")
 
 	log.Printf("Coordinator ready at :%d (cache=%v, hot-routing=enabled, hybrid=enabled)", 
@@ -108,11 +110,16 @@ func hybridSearchHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	alpha, _ := strconv.ParseFloat(r.URL.Query().Get("alpha"), 64)
+	
+	fusionMethod := r.URL.Query().Get("fusion")
+	if fusionMethod == "" {
+		fusionMethod = "rrf"
+	}
 
 	searchCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	resp, err := hybridSearcher.Search(searchCtx, q, qLimit, alpha)
+	resp, err := hybridSearcher.SearchWithFusion(searchCtx, q, qLimit, alpha, fusionMethod)
 	if err != nil {
 		http.Error(w, fmt.Sprintf(`{"error": "%v"}`, err), http.StatusInternalServerError)
 		return
@@ -120,8 +127,10 @@ func hybridSearchHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Search-Type", "hybrid")
+	w.Header().Set("X-Fusion-Method", fusionMethod)
 	json.NewEncoder(w).Encode(resp)
 }
+
 func coordSearchHandler(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
@@ -174,7 +183,6 @@ func coordSearchHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 3. HOT TERM ROUTING
 	perShardLimit := qLimit * 3
 	var shardHits []ShardHit
 	var routingType string
@@ -197,7 +205,6 @@ func coordSearchHandler(w http.ResponseWriter, r *http.Request) {
 		routingType = "cold"
 	}
 
-	// Global top-K merge
 	topHits := mergeTopK(shardHits, qLimit)
 
 	resp := CoordinatorResponse{
@@ -210,6 +217,7 @@ func coordSearchHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resultJSON, _ := json.Marshal(resp)
+
 	if rdb != nil {
 		rdb.SetEx(ctx, cacheKey, resultJSON, cacheTTL)
 		log.Printf("BACKEND + CACHED: %s (%v, routing=%s)", cacheKey, time.Since(start), routingType)

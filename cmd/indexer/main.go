@@ -70,7 +70,6 @@ func main() {
 	}
 	defer indexer.Close()
 
-	// Setup graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -82,7 +81,6 @@ func main() {
 		cancel()
 	}()
 
-	// Index documents
 	start := time.Now()
 	if err := indexer.IndexJSONL(ctx, *jsonlPath, *batchSize, *maxDocs); err != nil {
 		log.Fatalf("Indexing failed: %v", err)

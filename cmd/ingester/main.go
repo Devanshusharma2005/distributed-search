@@ -64,7 +64,6 @@ func cleanWikiText(raw string) string {
 	return strings.TrimSpace(text)
 }
 
-// N workers pulling the pages off the channel, cleaning the and pushing out the channel
 
 
 func worker(ctx context.Context, id int, in <-chan page, out chan<- model.Doc, counter *atomic.Int64) {
@@ -138,7 +137,6 @@ func main() {
 	var shardCounters []int
 
 	if *numShards > 0 {
-		// sharded mode -> creating sharded files
 		log.Printf("Sharding across %d files...", *numShards)
 		shardFiles = make([]*os.File, *numShards)
 		shardEncs = make([]*json.Encoder, *numShards)
@@ -155,7 +153,6 @@ func main() {
 			defer sf.Close()
 		}
 	} else {
-		// unsharded mode (backward compatability with monolith)
 		out, err := os.Create(*outputFile)
 		if err != nil {
 			log.Fatalf("create output: %v", err)
@@ -167,11 +164,10 @@ func main() {
 		shardCounters = []int{0}
 	}
 
-	// MD5 hash based shard routing
 	var hasher hash.Hash = md5.New()
 	shardDoc := func(docID string) int {
 		if *numShards == 0 {
-			return 0 // unsharded mode
+			return 0 
 		}
 		hasher.Reset()
 		hasher.Write([]byte(docID))
@@ -248,7 +244,6 @@ func main() {
 	for doc := range docCh {
 		batch = append(batch, doc)
 		if len(batch) >= batchSize {
-			// writing batch to appropriate shard files
 			for _, d := range batch {
 				shardID := shardDoc(d.ID)
 				shardCounters[shardID]++;
@@ -265,7 +260,6 @@ func main() {
 		}
 	}
 
-	// last batch is always < batchsize (this is kinda edge case)
 
 	for _, d := range batch {
 		shardID := shardDoc(d.ID)

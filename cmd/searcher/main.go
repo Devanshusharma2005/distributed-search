@@ -89,7 +89,6 @@ func main() {
 		Handler: r,
 	}
 
-	// Graceful shutdown
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
@@ -113,7 +112,6 @@ func main() {
 	log.Println("Shard service stopped")
 }
 
-// registerShard registers this shard in etcd with a keepalive lease
 func registerShard(ctx context.Context, shardID, port int, hostname, etcdEps string) {
 	eps := strings.Split(etcdEps, ",")
 
@@ -146,7 +144,6 @@ func registerShard(ctx context.Context, shardID, port int, hostname, etcdEps str
 
 	log.Printf("Shard-%d registered: %s → %s (lease=%d)", shardID, key, shardAddr, lease.ID)
 
-	// Heartbeat loop - keeps the lease alive until context is cancelled
 	for {
 		select {
 		case <-ctx.Done():

@@ -36,6 +36,7 @@ type HybridResult struct {
 	SemanticScore float64 `json:"semantic_score,omitempty"`
 	HybridScore   float64 `json:"hybrid_score"`
 	Shard         string  `json:"shard"`
+	FusionMethod  string  `json:"fusion_method,omitempty"` 
 }
 
 type HybridResponse struct {
@@ -43,7 +44,9 @@ type HybridResponse struct {
 	QueryVector  []float64      `json:"query_vector,omitempty"`
 	KeywordHits  int            `json:"keyword_hits"`
 	SemanticTopK int            `json:"semantic_topk"`
-	FusionAlpha  float64        `json:"fusion_alpha"`
+	FusionAlpha  float64        `json:"fusion_alpha,omitempty"`   
+	FusionMethod string         `json:"fusion_method"`            
+	FusionK      int            `json:"fusion_k,omitempty"`       
 	Hits         []HybridResult `json:"hits"`
 	Took         string         `json:"took"`
 	RoutingType  string         `json:"routing_type"`
@@ -53,6 +56,7 @@ type HybridSearcher struct {
 	embedClient  EmbeddingClient
 	etcdEps      string
 	defaultAlpha float64
+	rrfK         int 
 }
 
 func NewHybridSearcher(embedClient EmbeddingClient, etcdEps string) *HybridSearcher {
@@ -60,10 +64,15 @@ func NewHybridSearcher(embedClient EmbeddingClient, etcdEps string) *HybridSearc
 		embedClient:  embedClient,
 		etcdEps:      etcdEps,
 		defaultAlpha: 0.7, 
+		rrfK:         60,  
 	}
 }
 
 func (h *HybridSearcher) Search(ctx context.Context, query string, limit int, alpha float64) (*HybridResponse, error) {
+	return h.SearchWithFusion(ctx, query, limit, alpha, "rrf")
+}
+
+func (h *HybridSearcher) SearchWithFusion(ctx context.Context, query string, limit int, alpha float64, fusionMethod string) (*HybridResponse, error) {
 	start := time.Now()
 
 	if alpha == 0 {
@@ -75,7 +84,7 @@ func (h *HybridSearcher) Search(ctx context.Context, query string, limit int, al
 
 	queryVector, err := h.embedClient.GetEmbedding(embedCtx, query)
 	if err != nil {
-		log.Printf("⚠️  Embedding failed for '%s': %v (falling back to keyword-only)", query, err)
+		log.Printf("Embedding failed for '%s': %v (falling back to keyword-only)", query, err)
 		queryVector = nil
 	}
 
@@ -106,18 +115,187 @@ func (h *HybridSearcher) Search(ctx context.Context, query string, limit int, al
 		routingType = "cold"
 	}
 
-	shardHits = h.fanoutQueryParallel(targetShards, query, 100)
+	retrievalLimit := 100
+	if fusionMethod != "rrf" {
+		retrievalLimit = limit * 3 
+	}
 
-	hybridResults := make([]HybridResult, len(shardHits))
+	shardHits = h.fanoutQueryParallel(targetShards, query, retrievalLimit)
 
-	semanticCount := 0 
+	var hybridResults []HybridResult
+	var semanticCount int
 
-	for i, hit := range shardHits {
+	if fusionMethod == "rrf" && queryVector != nil {
+		hybridResults, semanticCount = h.fuseWithRRF(shardHits, queryVector, limit)
+	} else {
+		hybridResults, semanticCount = h.fuseWithWeights(shardHits, queryVector, alpha, limit)
+	}
+
+	resp := &HybridResponse{
+		Query:        query,
+		QueryVector:  queryVector,
+		KeywordHits:  len(shardHits),
+		SemanticTopK: len(hybridResults),
+		FusionMethod: fusionMethod,
+		Hits:         hybridResults,
+		Took:         time.Since(start).String(),
+		RoutingType:  routingType,
+	}
+
+	if fusionMethod == "rrf" {
+		resp.FusionK = h.rrfK
+	} else {
+		resp.FusionAlpha = alpha
+	}
+
+	log.Printf("HYBRID [%s]: '%s' → %d candidates, %d with vectors, %d final in %v",
+		strings.ToUpper(fusionMethod), query, len(shardHits), semanticCount, len(hybridResults), time.Since(start))
+
+	return resp, nil
+}
+
+func (h *HybridSearcher) fuseWithRRF(hits []ShardHit, queryVector []float64, limit int) ([]HybridResult, int) {
+	bm25Ranked := make([]ShardHit, len(hits))
+	copy(bm25Ranked, hits)
+	sort.Slice(bm25Ranked, func(i, j int) bool {
+		return bm25Ranked[i].Score > bm25Ranked[j].Score
+	})
+
+	type ScoredDoc struct {
+		Hit           ShardHit
+		SemanticScore float64
+	}
+
+	scoredDocs := make([]ScoredDoc, 0, len(hits))
+	semanticCount := 0
+
+	for _, hit := range hits {
+		if queryVector != nil && hit.TitleVector != nil && len(hit.TitleVector) > 0 {
+			semanticScore := CosineSimilarity(queryVector, hit.TitleVector)
+			scoredDocs = append(scoredDocs, ScoredDoc{
+				Hit:           hit,
+				SemanticScore: semanticScore,
+			})
+			semanticCount++
+		} else {
+			scoredDocs = append(scoredDocs, ScoredDoc{
+				Hit:           hit,
+				SemanticScore: 0.0,
+			})
+		}
+	}
+
+	semanticRanked := make([]ScoredDoc, len(scoredDocs))
+	copy(semanticRanked, scoredDocs)
+	sort.Slice(semanticRanked, func(i, j int) bool {
+		return semanticRanked[i].SemanticScore > semanticRanked[j].SemanticScore
+	})
+
+	bm25Ranks := make(map[string]int)
+	for rank, hit := range bm25Ranked {
+		bm25Ranks[hit.ID] = rank + 1 
+	}
+
+	semanticRanks := make(map[string]int)
+	for rank, doc := range semanticRanked {
+		semanticRanks[doc.Hit.ID] = rank + 1
+	}
+
+	type RRFResult struct {
+		ID            string
+		Title         string
+		KeywordScore  float64
+		SemanticScore float64
+		RRFScore      float64
+		Shard         string
+	}
+
+	rrfResults := make(map[string]*RRFResult)
+
+	for id := range bm25Ranks {
+		if _, exists := rrfResults[id]; !exists {
+			rrfResults[id] = &RRFResult{ID: id}
+		}
+	}
+
+	for id := range semanticRanks {
+		if _, exists := rrfResults[id]; !exists {
+			rrfResults[id] = &RRFResult{ID: id}
+		}
+	}
+
+	k := float64(h.rrfK)
+
+	for id, result := range rrfResults {
+		bm25Rank := bm25Ranks[id]
+		if bm25Rank == 0 {
+			bm25Rank = 101
+		}
+
+		semanticRank := semanticRanks[id]
+		if semanticRank == 0 {
+			semanticRank = 101 
+		}
+
+		result.RRFScore = 1.0/(k+float64(bm25Rank)) + 1.0/(k+float64(semanticRank))
+
+		for _, hit := range hits {
+			if hit.ID == id {
+				result.Title = hit.Title
+				result.KeywordScore = hit.Score
+				result.Shard = hit.Shard
+				break
+			}
+		}
+
+		for _, doc := range scoredDocs {
+			if doc.Hit.ID == id {
+				result.SemanticScore = doc.SemanticScore
+				break
+			}
+		}
+	}
+
+	rrfList := make([]RRFResult, 0, len(rrfResults))
+	for _, r := range rrfResults {
+		rrfList = append(rrfList, *r)
+	}
+
+	sort.Slice(rrfList, func(i, j int) bool {
+		return rrfList[i].RRFScore > rrfList[j].RRFScore
+	})
+
+	if len(rrfList) > limit {
+		rrfList = rrfList[:limit]
+	}
+
+	finalResults := make([]HybridResult, len(rrfList))
+	for i, r := range rrfList {
+		finalResults[i] = HybridResult{
+			ID:            r.ID,
+			Title:         r.Title,
+			KeywordScore:  r.KeywordScore,
+			SemanticScore: r.SemanticScore,
+			HybridScore:   r.RRFScore,
+			Shard:         r.Shard,
+			FusionMethod:  "RRF",
+		}
+	}
+
+	return finalResults, semanticCount
+}
+
+func (h *HybridSearcher) fuseWithWeights(hits []ShardHit, queryVector []float64, alpha float64, limit int) ([]HybridResult, int) {
+	hybridResults := make([]HybridResult, len(hits))
+	semanticCount := 0
+
+	for i, hit := range hits {
 		hybridResults[i] = HybridResult{
 			ID:           hit.ID,
 			Title:        hit.Title,
 			KeywordScore: hit.Score,
 			Shard:        hit.Shard,
+			FusionMethod: "weighted",
 		}
 
 		if queryVector != nil && hit.TitleVector != nil && len(hit.TitleVector) > 0 {
@@ -131,7 +309,6 @@ func (h *HybridSearcher) Search(ctx context.Context, query string, limit int, al
 		}
 	}
 
-	// Sorted by hybrid score (have to improve it from kway merge)
 	sort.Slice(hybridResults, func(i, j int) bool {
 		return hybridResults[i].HybridScore > hybridResults[j].HybridScore
 	})
@@ -140,21 +317,7 @@ func (h *HybridSearcher) Search(ctx context.Context, query string, limit int, al
 		hybridResults = hybridResults[:limit]
 	}
 
-	resp := &HybridResponse{
-		Query:        query,
-		QueryVector:  queryVector,
-		KeywordHits:  len(shardHits),
-		SemanticTopK: len(hybridResults),
-		FusionAlpha:  alpha,
-		Hits:         hybridResults,
-		Took:         time.Since(start).String(),
-		RoutingType:  routingType,
-	}
-
-	log.Printf("HYBRID: '%s' → %d candidates, %d with vectors, %d final (alpha=%.2f) in %v",
-		query, len(shardHits), semanticCount, len(hybridResults), alpha, time.Since(start))
-
-	return resp, nil
+	return hybridResults, semanticCount
 }
 
 func (h *HybridSearcher) discoverShards() ([]string, error) {
@@ -282,6 +445,7 @@ func (h *HybridSearcher) queryShard(shardAddr, q string, limit int) []ShardHit {
 			Title: getString(h.Fields["title"]),
 			Shard: shardAddr,
 		}
+
 		if vecField, ok := h.Fields["title_vector"]; ok {
 			hits[i].TitleVector = parseVector(vecField)
 		}
@@ -301,7 +465,6 @@ func parseVector(field interface{}) []float64 {
 		}
 		return vec
 	case []float64:
-		// Already correct type
 		return v
 	default:
 		return nil
