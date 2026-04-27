@@ -6,9 +6,11 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -o shard-server cmd/searcher/main.go
 
-FROM alpine:latest
-RUN apk --no-cache add ca-certificates wget
+FROM alpine:3.21
+RUN apk --no-cache add ca-certificates
+RUN adduser -D appuser
 WORKDIR /app
 COPY --from=builder /build/shard-server .
+USER appuser
 EXPOSE 8080
 ENTRYPOINT ["/app/shard-server"]

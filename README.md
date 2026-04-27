@@ -36,7 +36,7 @@ Production-grade distributed search engine combining **BM25 keyword matching** w
 
 ### Prerequisites
 - Docker & Docker Compose
-- Go 1.22+
+- Go 1.24+
 - 4GB RAM minimum
 
 ### Deploy
@@ -385,6 +385,7 @@ distributed-search/
 ├── cmd/
 │   ├── coordinator/main.go     (query router, cache, hybrid)
 │   ├── indexer/main.go         (document indexing + vectors)
+│   ├── ingester/main.go        (Wikipedia XML → JSONL pipeline)
 │   └── searcher/main.go        (shard service)
 ├── internal/
 │   ├── embed/client.go         (Ollama embedding client)
@@ -405,7 +406,7 @@ distributed-search/
 
 ## Technologies
 
-- **Go 1.22**: Primary language
+- **Go 1.24**: Primary language
 - **Bleve**: Full-text search (BM25)
 - **etcd**: Service discovery (Raft)
 - **Redis**: Caching (LRU)

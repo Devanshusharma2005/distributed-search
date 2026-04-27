@@ -75,25 +75,29 @@ func (h *HybridSearcher) Search(ctx context.Context, query string, limit int, al
 func (h *HybridSearcher) SearchWithFusion(ctx context.Context, query string, limit int, alpha float64, fusionMethod string) (*HybridResponse, error) {
 	start := time.Now()
 
-	if alpha == 0 {
+	if alpha < 0 {
 		alpha = h.defaultAlpha
 	}
 
-	embedCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
+	var queryVector []float64
+	if h.embedClient != nil {
+		embedCtx, embedCancel := context.WithTimeout(ctx, 5*time.Second)
+		defer embedCancel()
 
-	queryVector, err := h.embedClient.GetEmbedding(embedCtx, query)
-	if err != nil {
-		log.Printf("Embedding failed for '%s': %v (falling back to keyword-only)", query, err)
-		queryVector = nil
+		var err error
+		queryVector, err = h.embedClient.GetEmbedding(embedCtx, query)
+		if err != nil {
+			log.Printf("Embedding failed for '%s': %v (falling back to keyword-only)", query, err)
+			queryVector = nil
+		}
 	}
 
-	allShards, err := h.discoverShards()
+	allShards, err := h.discoverShards(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("discover shards: %w", err)
 	}
 
-	hotShardIDs, isHot := h.getHotTermShards(query)
+	hotShardIDs, isHot := h.getHotTermShards(ctx, query)
 
 	var shardHits []ShardHit
 	var routingType string
@@ -102,8 +106,8 @@ func (h *HybridSearcher) SearchWithFusion(ctx context.Context, query string, lim
 	if isHot && len(hotShardIDs) > 0 {
 		hotShardAddrs := make([]string, 0, len(hotShardIDs))
 		for _, shardID := range hotShardIDs {
-			if shardID >= 0 && shardID < len(allShards) {
-				hotShardAddrs = append(hotShardAddrs, allShards[shardID])
+			if addr, ok := allShards[shardID]; ok {
+				hotShardAddrs = append(hotShardAddrs, addr)
 			}
 		}
 		log.Printf("HYBRID: HOT TERM '%s' → %d shards", query, len(hotShardAddrs))
@@ -111,7 +115,10 @@ func (h *HybridSearcher) SearchWithFusion(ctx context.Context, query string, lim
 		routingType = "hot"
 	} else {
 		log.Printf("HYBRID: COLD TERM '%s' → ALL %d shards", query, len(allShards))
-		targetShards = allShards
+		targetShards = make([]string, 0, len(allShards))
+		for _, addr := range allShards {
+			targetShards = append(targetShards, addr)
+		}
 		routingType = "cold"
 	}
 
@@ -120,7 +127,7 @@ func (h *HybridSearcher) SearchWithFusion(ctx context.Context, query string, lim
 		retrievalLimit = limit * 3 
 	}
 
-	shardHits = h.fanoutQueryParallel(targetShards, query, retrievalLimit)
+	shardHits = h.fanoutQueryParallel(ctx, targetShards, query, retrievalLimit)
 
 	var hybridResults []HybridResult
 	var semanticCount int
@@ -320,7 +327,7 @@ func (h *HybridSearcher) fuseWithWeights(hits []ShardHit, queryVector []float64,
 	return hybridResults, semanticCount
 }
 
-func (h *HybridSearcher) discoverShards() ([]string, error) {
+func (h *HybridSearcher) discoverShards(parent context.Context) (map[int]string, error) {
 	cli, err := clientv3.New(clientv3.Config{
 		Endpoints:   strings.Split(h.etcdEps, ","),
 		DialTimeout: 5 * time.Second,
@@ -330,7 +337,7 @@ func (h *HybridSearcher) discoverShards() ([]string, error) {
 	}
 	defer cli.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
 	defer cancel()
 
 	resp, err := cli.Get(ctx, "/shards/active/", clientv3.WithPrefix())
@@ -338,16 +345,23 @@ func (h *HybridSearcher) discoverShards() ([]string, error) {
 		return nil, fmt.Errorf("etcd get: %w", err)
 	}
 
-	shards := make([]string, 0, len(resp.Kvs))
+	shards := make(map[int]string, len(resp.Kvs))
 	for _, kv := range resp.Kvs {
-		shardAddr := string(kv.Value)
-		shards = append(shards, shardAddr)
+		key := string(kv.Key)
+		parts := strings.Split(key, "/")
+		idStr := parts[len(parts)-1]
+		id, err := strconv.Atoi(idStr)
+		if err != nil {
+			log.Printf("Skipping shard with non-numeric ID: %s", key)
+			continue
+		}
+		shards[id] = string(kv.Value)
 	}
 
 	return shards, nil
 }
 
-func (h *HybridSearcher) getHotTermShards(term string) ([]int, bool) {
+func (h *HybridSearcher) getHotTermShards(parent context.Context, term string) ([]int, bool) {
 	cli, err := clientv3.New(clientv3.Config{
 		Endpoints:   strings.Split(h.etcdEps, ","),
 		DialTimeout: 1 * time.Second,
@@ -357,7 +371,7 @@ func (h *HybridSearcher) getHotTermShards(term string) ([]int, bool) {
 	}
 	defer cli.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 1*time.Second)
 	defer cancel()
 
 	key := fmt.Sprintf("/hot_terms/%s/shards", term)
@@ -380,7 +394,9 @@ func (h *HybridSearcher) getHotTermShards(term string) ([]int, bool) {
 	return shardIDs, true
 }
 
-func (h *HybridSearcher) fanoutQueryParallel(shards []string, q string, perShardLimit int) []ShardHit {
+var shardHTTPClient = &http.Client{Timeout: 10 * time.Second}
+
+func (h *HybridSearcher) fanoutQueryParallel(ctx context.Context, shards []string, q string, perShardLimit int) []ShardHit {
 	var wg sync.WaitGroup
 	hitsCh := make(chan ShardHit, len(shards)*perShardLimit)
 
@@ -388,7 +404,7 @@ func (h *HybridSearcher) fanoutQueryParallel(shards []string, q string, perShard
 		wg.Add(1)
 		go func(addr string) {
 			defer wg.Done()
-			hits := h.queryShard(addr, q, perShardLimit)
+			hits := h.queryShard(ctx, addr, q, perShardLimit)
 			for _, hit := range hits {
 				hitsCh <- hit
 			}
@@ -408,11 +424,17 @@ func (h *HybridSearcher) fanoutQueryParallel(shards []string, q string, perShard
 	return allHits
 }
 
-func (h *HybridSearcher) queryShard(shardAddr, q string, limit int) []ShardHit {
+func (h *HybridSearcher) queryShard(ctx context.Context, shardAddr, q string, limit int) []ShardHit {
 	queryURL := fmt.Sprintf("http://%s/search?q=%s&limit=%d",
 		shardAddr, url.QueryEscape(q), limit)
 
-	resp, err := http.Get(queryURL)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, queryURL, nil)
+	if err != nil {
+		log.Printf("Shard %s request build error: %v", shardAddr, err)
+		return nil
+	}
+
+	resp, err := shardHTTPClient.Do(req)
 	if err != nil {
 		log.Printf("Shard %s error: %v", shardAddr, err)
 		return nil

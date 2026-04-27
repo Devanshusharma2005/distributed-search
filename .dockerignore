@@ -1,0 +1,38 @@
+.git
+.gitignore
+.dockerignore
+
+# Index data
+search.bleve/
+search.bleve-*/
+search-backup-*/
+
+# Raw data
+*.xml
+*.jsonl
+shard-*.jsonl
+docs.jsonl
+
+# Binaries
+coordinator
+coord
+shard-server
+indexer-bin
+indexer-vector
+*.exe
+*.test
+
+# Infrastructure snapshots
+default.etcd/
+dump.rdb
+
+# IDE / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# Misc
+results.bin
+0
+data/

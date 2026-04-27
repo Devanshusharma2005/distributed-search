@@ -11,6 +11,7 @@ __debug_bin
 # --- Index Data & Backups (Massive Binary Files) ---
 # We ignore the actual Bleve index data to keep Git light
 data/
+search.bleve/
 search.bleve-*/
 search-backup-*/
 shard-*.jsonl

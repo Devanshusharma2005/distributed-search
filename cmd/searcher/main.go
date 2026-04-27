@@ -120,13 +120,15 @@ func registerShard(ctx context.Context, shardID, port int, hostname, etcdEps str
 		DialTimeout: 5 * time.Second,
 	})
 	if err != nil {
-		log.Fatalf("etcd connect: %v", err)
+		log.Printf("etcd connect failed (shard-%d): %v", shardID, err)
+		return
 	}
 	defer cli.Close()
 
 	lease, err := cli.Grant(ctx, 30)
 	if err != nil {
-		log.Fatalf("etcd lease: %v", err)
+		log.Printf("etcd lease failed (shard-%d): %v", shardID, err)
+		return
 	}
 
 	shardAddr := fmt.Sprintf("%s:%d", hostname, port)
@@ -134,12 +136,14 @@ func registerShard(ctx context.Context, shardID, port int, hostname, etcdEps str
 
 	_, err = cli.Put(ctx, key, shardAddr, clientv3.WithLease(lease.ID))
 	if err != nil {
-		log.Fatalf("etcd put %s: %v", key, err)
+		log.Printf("etcd put %s failed: %v", key, err)
+		return
 	}
 
 	ch, kaErr := cli.KeepAlive(ctx, lease.ID)
 	if kaErr != nil {
-		log.Fatalf("etcd keepalive: %v", kaErr)
+		log.Printf("etcd keepalive failed (shard-%d): %v", shardID, kaErr)
+		return
 	}
 
 	log.Printf("Shard-%d registered: %s → %s (lease=%d)", shardID, key, shardAddr, lease.ID)
@@ -192,7 +196,9 @@ func searchHandler(idx bleve.Index, shardID int) http.HandlerFunc {
 
 		res, err := idx.Search(req)
 		if err != nil {
-			http.Error(w, `{"error": "`+err.Error()+`"}`, http.StatusInternalServerError)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			queriesTotal.WithLabelValues("error", shardLabel).Inc()
 			queryLatency.WithLabelValues("error", shardLabel).Observe(time.Since(start).Seconds())
 			return

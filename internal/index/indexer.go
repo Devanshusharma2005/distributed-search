@@ -153,7 +153,10 @@ flush:
 	}
 
 	elapsed := time.Since(start)
-	docsPerSec := float64(indexed) / elapsed.Seconds()
+	var docsPerSec float64
+	if elapsed.Seconds() > 0 {
+		docsPerSec = float64(indexed) / elapsed.Seconds()
+	}
 
 	log.Printf("Indexing complete:")
 	log.Printf("%d docs indexed, %d skipped", indexed, skipped)

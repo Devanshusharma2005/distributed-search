@@ -7,453 +7,361 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"net/url"
-	"sort"
+	"os"
+	"os/signal"
 	"strconv"
 	"strings"
-	"sync"
+	"syscall"
 	"time"
 
-	clientv3 "go.etcd.io/etcd/client/v3"
-	"github.com/gorilla/mux"
-	"github.com/redis/go-redis/v9"
 	"github.com/Devanshusharma2005/distributed-search/internal/embed"
 	"github.com/Devanshusharma2005/distributed-search/internal/hybrid"
+	"github.com/gorilla/mux"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/redis/go-redis/v9"
+	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
 var (
-	etcdEps   = flag.String("etcd", "localhost:2379,localhost:2381,localhost:2383", "etcd endpoints")
-	port      = flag.Int("port", 8090, "coordinator HTTP port")
-	limit     = flag.Int("limit", 20, "default global top-K limit")
-	redisAddr = flag.String("redis", "localhost:6379", "redis address")
-	cacheTTL  = 5 * time.Minute
-)
+	queryLatency = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "coordinator_query_latency_seconds",
+		Help:    "Query latency distribution",
+		Buckets: prometheus.DefBuckets,
+	}, []string{"endpoint", "status"})
 
-var (
-	ctx context.Context
-	rdb *redis.Client
-	
-	embedClient    *embed.OllamaClient
-	hybridSearcher *hybrid.HybridSearcher
+	queriesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "coordinator_queries_total",
+		Help: "Total queries processed",
+	}, []string{"endpoint", "status"})
+
+	cacheHits = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "coordinator_cache_hits_total",
+		Help: "Total cache hits",
+	})
+	cacheMisses = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "coordinator_cache_misses_total",
+		Help: "Total cache misses",
+	})
 )
 
 func init() {
-	ctx = context.Background()
+	prometheus.MustRegister(queryLatency, queriesTotal, cacheHits, cacheMisses)
 }
 
-type ShardHit struct {
-	ID    string  `json:"id"`
-	Score float64 `json:"score"`
-	Title string  `json:"title"`
-	Shard string  `json:"shard,omitempty"`
-}
+var (
+	port      = flag.Int("port", 8090, "HTTP port")
+	etcdEps   = flag.String("etcd", "localhost:2379,localhost:2381,localhost:2383", "etcd endpoints (comma-separated)")
+	redisAddr = flag.String("redis", "localhost:6379", "Redis address")
+	ollamaURL = flag.String("ollama", "http://localhost:11434", "Ollama API URL")
+)
 
-type CoordinatorResponse struct {
-	Query       string     `json:"query"`
-	Shards      int        `json:"shards"`
-	TotalHits   int        `json:"total_hits"`
-	Hits        []ShardHit `json:"hits"`
-	Took        string     `json:"took"`
-	RoutingType string     `json:"routing_type"` 
-}
+const (
+	cacheTTL     = 5 * time.Minute
+	ollamaModel  = "all-minilm"
+	defaultLimit = 20
+)
 
 func main() {
 	flag.Parse()
 
-	rdb = redis.NewClient(&redis.Options{
-		Addr: *redisAddr,
-	})
+	log.Printf("Starting coordinator on :%d (etcd=%s, redis=%s, ollama=%s)",
+		*port, *etcdEps, *redisAddr, *ollamaURL)
 
+	rdb := redis.NewClient(&redis.Options{Addr: *redisAddr})
+	defer rdb.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	if err := rdb.Ping(ctx).Err(); err != nil {
-		log.Printf("Redis not available at %s: %v (cache disabled)", *redisAddr, err)
+		log.Printf("Redis not reachable: %v (caching disabled)", err)
 		rdb = nil
 	} else {
 		log.Printf("Redis connected at %s", *redisAddr)
 	}
+	cancel()
 
-	embedClient = embed.NewOllamaClient("http://ollama:11434", "all-minilm")
-	log.Printf("Embedding client initialized (model=all-minilm, url=http://ollama:11434)")
+	var embedClient hybrid.EmbeddingClient
+	ollamaClient := embed.NewOllamaClient(*ollamaURL, ollamaModel)
 
-	hybridSearcher = hybrid.NewHybridSearcher(embedClient, *etcdEps)
-	log.Printf("Hybrid search engine ready (alpha=0.7)")
+	ctx, cancel = context.WithTimeout(context.Background(), 3*time.Second)
+	_, err := ollamaClient.GetEmbedding(ctx, "test")
+	cancel()
+	if err != nil {
+		log.Printf("Ollama not reachable: %v (hybrid search will use keyword-only)", err)
+	} else {
+		embedClient = ollamaClient
+		log.Printf("Ollama connected at %s (model=%s)", *ollamaURL, ollamaModel)
+	}
 
-	log.Printf("Coordinator starting on port %d (Phase 5: Hybrid Search)...", *port)
+	searcher := hybrid.NewHybridSearcher(embedClient, *etcdEps)
 
 	r := mux.NewRouter()
-	r.HandleFunc("/search", coordSearchHandler).Methods("GET")
-	r.HandleFunc("/shards", listShardsHandler).Methods("GET")
-	r.HandleFunc("/hot-terms", listHotTermsHandler).Methods("GET")
+	r.HandleFunc("/search", searchHandler(searcher, rdb)).Methods("GET")
+	r.HandleFunc("/hybrid", hybridHandler(searcher, rdb)).Methods("GET")
+	r.HandleFunc("/shards", shardsHandler(*etcdEps)).Methods("GET")
+	r.HandleFunc("/hot-terms", hotTermsHandler(*etcdEps)).Methods("GET")
 	r.HandleFunc("/health", healthHandler).Methods("GET")
-	
-	r.HandleFunc("/hybrid", hybridSearchHandler).Methods("GET")
+	r.Handle("/metrics", promhttp.Handler())
 
-	log.Printf("Coordinator ready at :%d (cache=%v, hot-routing=enabled, hybrid=enabled)", 
-		*port, rdb != nil)
-	log.Fatal(http.ListenAndServe(":"+strconv.Itoa(*port), r))
+	srv := &http.Server{
+		Addr:    ":" + strconv.Itoa(*port),
+		Handler: r,
+	}
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		log.Printf("HTTP listening on :%d", *port)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("HTTP server: %v", err)
+		}
+	}()
+
+	<-quit
+	log.Println("Shutdown signal received...")
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("HTTP shutdown error: %v", err)
+	}
+	log.Println("Coordinator stopped")
+}
+
+func cacheKey(endpoint, query string, limit int) string {
+	return fmt.Sprintf("%s:%s:%d", endpoint, query, limit)
+}
+
+func getFromCache(ctx context.Context, rdb *redis.Client, key string) ([]byte, bool) {
+	if rdb == nil {
+		return nil, false
+	}
+	val, err := rdb.Get(ctx, key).Bytes()
+	if err != nil {
+		return nil, false
+	}
+	return val, true
+}
+
+func setCache(ctx context.Context, rdb *redis.Client, key string, data []byte) {
+	if rdb == nil {
+		return
+	}
+	rdb.Set(ctx, key, data, cacheTTL)
+}
+
+func writeJSON(w http.ResponseWriter, v interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		log.Printf("JSON encode error: %v", err)
+	}
+}
+
+func writeError(w http.ResponseWriter, msg string, code int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	resp := map[string]string{"error": msg}
+	json.NewEncoder(w).Encode(resp)
+}
+
+func searchHandler(searcher *hybrid.HybridSearcher, rdb *redis.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+
+		q := r.URL.Query().Get("q")
+		if q == "" {
+			writeError(w, "missing 'q' parameter", http.StatusBadRequest)
+			queriesTotal.WithLabelValues("search", "error").Inc()
+			return
+		}
+
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		if limit <= 0 {
+			limit = defaultLimit
+		}
+
+		key := cacheKey("search", q, limit)
+		if cached, ok := getFromCache(r.Context(), rdb, key); ok {
+			cacheHits.Inc()
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("X-Cache", "HIT")
+			w.Write(cached)
+			queriesTotal.WithLabelValues("search", "success").Inc()
+			queryLatency.WithLabelValues("search", "success").Observe(time.Since(start).Seconds())
+			return
+		}
+		cacheMisses.Inc()
+
+		resp, err := searcher.Search(r.Context(), q, limit, -1)
+		if err != nil {
+			writeError(w, err.Error(), http.StatusInternalServerError)
+			queriesTotal.WithLabelValues("search", "error").Inc()
+			queryLatency.WithLabelValues("search", "error").Observe(time.Since(start).Seconds())
+			return
+		}
+
+		data, _ := json.Marshal(resp)
+		setCache(r.Context(), rdb, key, data)
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Cache", "MISS")
+		w.Write(data)
+
+		queriesTotal.WithLabelValues("search", "success").Inc()
+		queryLatency.WithLabelValues("search", "success").Observe(time.Since(start).Seconds())
+
+		log.Printf("SEARCH '%s' → %d hits in %v", q, len(resp.Hits), time.Since(start))
+	}
+}
+
+func hybridHandler(searcher *hybrid.HybridSearcher, rdb *redis.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+
+		q := r.URL.Query().Get("q")
+		if q == "" {
+			writeError(w, "missing 'q' parameter", http.StatusBadRequest)
+			queriesTotal.WithLabelValues("hybrid", "error").Inc()
+			return
+		}
+
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		if limit <= 0 {
+			limit = 10
+		}
+
+		alpha := -1.0
+		if alphaStr := r.URL.Query().Get("alpha"); alphaStr != "" {
+			if parsed, err := strconv.ParseFloat(alphaStr, 64); err == nil {
+				alpha = parsed
+			}
+		}
+
+		fusionMethod := r.URL.Query().Get("fusion")
+		if fusionMethod == "" {
+			fusionMethod = "rrf"
+		}
+
+		key := cacheKey("hybrid", fmt.Sprintf("%s:%.2f:%s", q, alpha, fusionMethod), limit)
+		if cached, ok := getFromCache(r.Context(), rdb, key); ok {
+			cacheHits.Inc()
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("X-Cache", "HIT")
+			w.Write(cached)
+			queriesTotal.WithLabelValues("hybrid", "success").Inc()
+			queryLatency.WithLabelValues("hybrid", "success").Observe(time.Since(start).Seconds())
+			return
+		}
+		cacheMisses.Inc()
+
+		resp, err := searcher.SearchWithFusion(r.Context(), q, limit, alpha, fusionMethod)
+		if err != nil {
+			writeError(w, err.Error(), http.StatusInternalServerError)
+			queriesTotal.WithLabelValues("hybrid", "error").Inc()
+			queryLatency.WithLabelValues("hybrid", "error").Observe(time.Since(start).Seconds())
+			return
+		}
+
+		data, _ := json.Marshal(resp)
+		setCache(r.Context(), rdb, key, data)
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Cache", "MISS")
+		w.Write(data)
+
+		queriesTotal.WithLabelValues("hybrid", "success").Inc()
+		queryLatency.WithLabelValues("hybrid", "success").Observe(time.Since(start).Seconds())
+
+		log.Printf("HYBRID '%s' → %d hits in %v", q, len(resp.Hits), time.Since(start))
+	}
+}
+
+func shardsHandler(etcdEps string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		cli, err := clientv3.New(clientv3.Config{
+			Endpoints:   strings.Split(etcdEps, ","),
+			DialTimeout: 3 * time.Second,
+		})
+		if err != nil {
+			writeError(w, "etcd connect: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer cli.Close()
+
+		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		defer cancel()
+
+		resp, err := cli.Get(ctx, "/shards/active/", clientv3.WithPrefix())
+		if err != nil {
+			writeError(w, "etcd get: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		type shardInfo struct {
+			ID      string `json:"id"`
+			Address string `json:"address"`
+		}
+
+		shards := make([]shardInfo, 0, len(resp.Kvs))
+		for _, kv := range resp.Kvs {
+			key := string(kv.Key)
+			parts := strings.Split(key, "/")
+			id := parts[len(parts)-1]
+			shards = append(shards, shardInfo{ID: id, Address: string(kv.Value)})
+		}
+
+		writeJSON(w, map[string]interface{}{
+			"count":  len(shards),
+			"shards": shards,
+		})
+	}
+}
+
+func hotTermsHandler(etcdEps string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		cli, err := clientv3.New(clientv3.Config{
+			Endpoints:   strings.Split(etcdEps, ","),
+			DialTimeout: 3 * time.Second,
+		})
+		if err != nil {
+			writeError(w, "etcd connect: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer cli.Close()
+
+		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		defer cancel()
+
+		resp, err := cli.Get(ctx, "/hot_terms/", clientv3.WithPrefix())
+		if err != nil {
+			writeError(w, "etcd get: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		type hotTerm struct {
+			Term   string `json:"term"`
+			Shards string `json:"shards"`
+		}
+
+		terms := make([]hotTerm, 0, len(resp.Kvs))
+		for _, kv := range resp.Kvs {
+			key := string(kv.Key)
+			parts := strings.Split(key, "/")
+			if len(parts) >= 3 {
+				term := parts[2]
+				terms = append(terms, hotTerm{Term: term, Shards: string(kv.Value)})
+			}
+		}
+
+		writeJSON(w, map[string]interface{}{
+			"count": len(terms),
+			"terms": terms,
+		})
+	}
 }
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("OK"))
-}
-
-func hybridSearchHandler(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query().Get("q")
-	if q == "" {
-		http.Error(w, `{"error": "missing 'q' parameter"}`, http.StatusBadRequest)
-		return
-	}
-
-	qLimit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	if qLimit <= 0 {
-		qLimit = 10
-	}
-
-	alpha, _ := strconv.ParseFloat(r.URL.Query().Get("alpha"), 64)
-	
-	fusionMethod := r.URL.Query().Get("fusion")
-	if fusionMethod == "" {
-		fusionMethod = "rrf"
-	}
-
-	searchCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	resp, err := hybridSearcher.SearchWithFusion(searchCtx, q, qLimit, alpha, fusionMethod)
-	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error": "%v"}`, err), http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("X-Search-Type", "hybrid")
-	w.Header().Set("X-Fusion-Method", fusionMethod)
-	json.NewEncoder(w).Encode(resp)
-}
-
-func coordSearchHandler(w http.ResponseWriter, r *http.Request) {
-	start := time.Now()
-
-	q := r.URL.Query().Get("q")
-	if q == "" {
-		http.Error(w, `{"error": "missing 'q' parameter"}`, http.StatusBadRequest)
-		return
-	}
-
-	qLimit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	if qLimit <= 0 {
-		qLimit = *limit
-	}
-
-	cacheKey := fmt.Sprintf("search:%s:%d", q, qLimit)
-
-	if rdb != nil {
-		cached, err := rdb.Get(ctx, cacheKey).Result()
-		if err == nil {
-			log.Printf("CACHE HIT: %s", cacheKey)
-			w.Header().Set("Content-Type", "application/json")
-			w.Header().Set("X-Cache", "HIT")
-			w.Header().Set("X-Took", time.Since(start).String())
-			w.Write([]byte(cached))
-			return
-		}
-
-		lockKey := cacheKey + ":lock"
-		locked, _ := rdb.SetNX(ctx, lockKey, "1", 2*time.Second).Result()
-		if locked {
-			defer rdb.Del(ctx, lockKey)
-			log.Printf("CACHE MISS + LOCK: %s", cacheKey)
-		} else {
-			time.Sleep(50 * time.Millisecond)
-			cached, _ := rdb.Get(ctx, cacheKey).Result()
-			if cached != "" {
-				log.Printf("CACHE populated by other request: %s", cacheKey)
-				w.Header().Set("Content-Type", "application/json")
-				w.Header().Set("X-Cache", "HIT_WAIT")
-				w.Header().Set("X-Took", time.Since(start).String())
-				w.Write([]byte(cached))
-				return
-			}
-		}
-	}
-
-	allShards, err := discoverShards()
-	if err != nil || len(allShards) == 0 {
-		http.Error(w, fmt.Sprintf(`{"error": "no shards available: %v"}`, err), http.StatusServiceUnavailable)
-		return
-	}
-
-	perShardLimit := qLimit * 3
-	var shardHits []ShardHit
-	var routingType string
-
-	hotShardIDs, isHot := getHotTermShards(q)
-	if isHot && len(hotShardIDs) > 0 {
-		hotShardAddrs := make([]string, 0, len(hotShardIDs))
-		for _, shardID := range hotShardIDs {
-			if shardID >= 0 && shardID < len(allShards) {
-				hotShardAddrs = append(hotShardAddrs, allShards[shardID])
-			}
-		}
-		log.Printf("HOT TERM '%s' → %d affinity shards (not %d)", q, len(hotShardAddrs), len(allShards))
-		shardHits = fanoutQueryParallel(hotShardAddrs, q, perShardLimit)
-		routingType = "hot"
-		updateHotTermStats(q, len(shardHits), len(hotShardAddrs))
-	} else {
-		log.Printf("COLD TERM '%s' → ALL %d shards", q, len(allShards))
-		shardHits = fanoutQueryParallel(allShards, q, perShardLimit)
-		routingType = "cold"
-	}
-
-	topHits := mergeTopK(shardHits, qLimit)
-
-	resp := CoordinatorResponse{
-		Query:       q,
-		Shards:      len(allShards),
-		TotalHits:   len(shardHits),
-		Hits:        topHits,
-		Took:        time.Since(start).String(),
-		RoutingType: routingType,
-	}
-
-	resultJSON, _ := json.Marshal(resp)
-
-	if rdb != nil {
-		rdb.SetEx(ctx, cacheKey, resultJSON, cacheTTL)
-		log.Printf("BACKEND + CACHED: %s (%v, routing=%s)", cacheKey, time.Since(start), routingType)
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	if rdb != nil {
-		w.Header().Set("X-Cache", "MISS")
-	}
-	w.Header().Set("X-Took", time.Since(start).String())
-	w.Header().Set("X-Routing", routingType)
-	w.Write(resultJSON)
-
-	log.Printf("Coordinator: '%s' → %d hits (%s routing) in %v", q, len(topHits), routingType, time.Since(start))
-}
-
-func getHotTermShards(term string) ([]int, bool) {
-	cli, err := clientv3.New(clientv3.Config{
-		Endpoints:   strings.Split(*etcdEps, ","),
-		DialTimeout: 1 * time.Second,
-	})
-	if err != nil {
-		return nil, false
-	}
-	defer cli.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-	defer cancel()
-
-	key := fmt.Sprintf("/hot_terms/%s/shards", term)
-	resp, err := cli.Get(ctx, key)
-	if err != nil || len(resp.Kvs) == 0 {
-		return nil, false
-	}
-
-	shardStr := string(resp.Kvs[0].Value)
-	idStrs := strings.Split(shardStr, ",")
-	shardIDs := make([]int, 0, len(idStrs))
-
-	for _, idStr := range idStrs {
-		idStr = strings.TrimSpace(idStr)
-		if id, err := strconv.Atoi(idStr); err == nil {
-			shardIDs = append(shardIDs, id)
-		}
-	}
-
-	return shardIDs, true
-}
-
-func updateHotTermStats(term string, hitCount, shardCount int) {
-	cli, err := clientv3.New(clientv3.Config{
-		Endpoints:   strings.Split(*etcdEps, ","),
-		DialTimeout: 1 * time.Second,
-	})
-	if err != nil {
-		return
-	}
-	defer cli.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-	defer cancel()
-
-	key := fmt.Sprintf("/hot_terms/%s/stats", term)
-	value := fmt.Sprintf("hits:%d shards:%d ts:%d", hitCount, shardCount, time.Now().Unix())
-	cli.Put(ctx, key, value)
-}
-
-func discoverShards() ([]string, error) {
-	cli, err := clientv3.New(clientv3.Config{
-		Endpoints:   strings.Split(*etcdEps, ","),
-		DialTimeout: 5 * time.Second,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("etcd connect: %w", err)
-	}
-	defer cli.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	resp, err := cli.Get(ctx, "/shards/active/", clientv3.WithPrefix())
-	if err != nil {
-		return nil, fmt.Errorf("etcd get: %w", err)
-	}
-
-	shards := make([]string, 0, len(resp.Kvs))
-	for _, kv := range resp.Kvs {
-		shardAddr := string(kv.Value)
-		shards = append(shards, shardAddr)
-	}
-
-	return shards, nil
-}
-
-func fanoutQueryParallel(shards []string, q string, perShardLimit int) []ShardHit {
-	var wg sync.WaitGroup
-	hitsCh := make(chan ShardHit, len(shards)*perShardLimit)
-
-	for _, shardAddr := range shards {
-		wg.Add(1)
-		go func(addr string) {
-			defer wg.Done()
-			hits := queryShard(addr, q, perShardLimit)
-			for _, hit := range hits {
-				hitsCh <- hit
-			}
-		}(shardAddr)
-	}
-
-	go func() {
-		wg.Wait()
-		close(hitsCh)
-	}()
-
-	allHits := make([]ShardHit, 0, len(shards)*perShardLimit)
-	for hit := range hitsCh {
-		allHits = append(allHits, hit)
-	}
-
-	return allHits
-}
-
-func queryShard(shardAddr, q string, limit int) []ShardHit {
-	queryURL := fmt.Sprintf("http://%s/search?q=%s&limit=%d",
-		shardAddr, url.QueryEscape(q), limit)
-
-	resp, err := http.Get(queryURL)
-	if err != nil {
-		log.Printf("Shard %s error: %v", shardAddr, err)
-		return nil
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		log.Printf("Shard %s returned status %d", shardAddr, resp.StatusCode)
-		return nil
-	}
-
-	var bleveRes struct {
-		Hits []struct {
-			ID     string                 `json:"id"`
-			Score  float64                `json:"score"`
-			Fields map[string]interface{} `json:"fields"`
-		} `json:"hits"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&bleveRes); err != nil {
-		log.Printf("Shard %s decode error: %v", shardAddr, err)
-		return nil
-	}
-
-	hits := make([]ShardHit, len(bleveRes.Hits))
-	for i, h := range bleveRes.Hits {
-		hits[i] = ShardHit{
-			ID:    h.ID,
-			Score: h.Score,
-			Title: getString(h.Fields["title"]),
-			Shard: shardAddr,
-		}
-	}
-
-	return hits
-}
-
-func mergeTopK(allHits []ShardHit, k int) []ShardHit {
-	sort.Slice(allHits, func(i, j int) bool {
-		return allHits[i].Score > allHits[j].Score
-	})
-
-	if len(allHits) <= k {
-		return allHits
-	}
-	return allHits[:k]
-}
-
-func getString(v interface{}) string {
-	if s, ok := v.(string); ok {
-		return s
-	}
-	return ""
-}
-
-func listShardsHandler(w http.ResponseWriter, r *http.Request) {
-	shards, err := discoverShards()
-	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error": "%v"}`, err), http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"shards": shards,
-		"count":  len(shards),
-	})
-}
-
-func listHotTermsHandler(w http.ResponseWriter, r *http.Request) {
-	cli, err := clientv3.New(clientv3.Config{
-		Endpoints:   strings.Split(*etcdEps, ","),
-		DialTimeout: 5 * time.Second,
-	})
-	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error": "%v"}`, err), http.StatusInternalServerError)
-		return
-	}
-	defer cli.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	resp, err := cli.Get(ctx, "/hot_terms/", clientv3.WithPrefix())
-	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error": "%v"}`, err), http.StatusInternalServerError)
-		return
-	}
-
-	hotTerms := make(map[string]map[string]string)
-	for _, kv := range resp.Kvs {
-		key := string(kv.Key)
-		value := string(kv.Value)
-
-		parts := strings.Split(strings.TrimPrefix(key, "/hot_terms/"), "/")
-		if len(parts) == 2 {
-			term := parts[0]
-			field := parts[1]
-
-			if _, exists := hotTerms[term]; !exists {
-				hotTerms[term] = make(map[string]string)
-			}
-			hotTerms[term][field] = value
-		}
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"hot_terms": hotTerms,
-		"count":     len(hotTerms),
-	})
 }

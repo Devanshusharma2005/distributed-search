@@ -127,12 +127,7 @@ func main() {
 	}
 	defer f.Close()
 
-	// out, err := os.Create(*outputFile)
-	// if err != nil {
-	// 	log.Fatalf("create output: %v", err)
-	// }
-	// defer out.Close()
-    var shardFiles []*os.File
+	var shardFiles []*os.File
 	var shardEncs  []*json.Encoder
 	var shardCounters []int
 
